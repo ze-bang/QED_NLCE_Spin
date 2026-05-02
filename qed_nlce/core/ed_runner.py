@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -27,15 +28,71 @@ if HAS_H5PY:
 
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-# core/ -> nlce/ -> workflows/ -> repo root
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(_THIS_DIR)))
-DEFAULT_ED_PATH = os.path.join(_REPO_ROOT, "build", "ED")
+
+
+def _candidate_ed_paths() -> list[str]:
+    """Ordered list of plausible locations for the ``ED`` binary.
+
+    qed_nlce ships standalone -- it does not bundle ``ED`` itself --
+    so we must locate the binary at runtime. Search order:
+
+    1. ``$QED_ED_BINARY`` env var (explicit override).
+    2. ``$ED_BINARY`` env var (legacy override).
+    3. ``shutil.which("ED")`` (binary on ``$PATH``, typical for users
+       who ran ``cmake --install`` or rely on a wheel that drops the
+       binary in ``$VIRTUAL_ENV/bin``).
+    4. ``./build/ED`` relative to the current working directory
+       (typical when the user runs ``qed-nlce`` from a sibling QED
+       checkout).
+    5. ``../QED/build/ED``, ``../../QED/build/ED`` -- relative to a
+       QED checkout sitting next to QED_NLCE.
+    6. ``$VIRTUAL_ENV/bin/ED``.
+    """
+    out: list[str] = []
+    for env_var in ("QED_ED_BINARY", "ED_BINARY"):
+        v = os.environ.get(env_var)
+        if v:
+            out.append(v)
+    on_path = shutil.which("ED")
+    if on_path:
+        out.append(on_path)
+    cwd = os.getcwd()
+    out.append(os.path.join(cwd, "build", "ED"))
+    out.append(os.path.join(cwd, "..", "QED", "build", "ED"))
+    out.append(os.path.join(cwd, "..", "..", "QED", "build", "ED"))
+    venv = os.environ.get("VIRTUAL_ENV")
+    if venv:
+        out.append(os.path.join(venv, "bin", "ED"))
+    # Try the qed Python package's install root as a last resort.
+    try:
+        import qed as _qed  # type: ignore
+        pkg_dir = os.path.dirname(os.path.abspath(_qed.__file__))
+        out.append(os.path.join(pkg_dir, "..", "..", "..", "bin", "ED"))
+        out.append(os.path.join(pkg_dir, "..", "bin", "ED"))
+    except Exception:
+        pass
+    return out
+
+
+def discover_ed_binary() -> Optional[str]:
+    """Return the first existing/executable path from :func:`_candidate_ed_paths`."""
+    for p in _candidate_ed_paths():
+        p_abs = os.path.abspath(p)
+        if os.path.isfile(p_abs) and os.access(p_abs, os.X_OK):
+            return p_abs
+    return None
+
+
+# Best-effort default at import time (pure string for backwards-compat).
+# May not exist on disk -- callers must check.
+DEFAULT_ED_PATH = discover_ed_binary() or os.path.join(os.getcwd(), "build", "ED")
 
 
 __all__ = [
     "DEFAULT_ED_PATH",
     "EDOptions",
     "build_ed_command",
+    "discover_ed_binary",
     "run_ed_subprocess",
 ]
 

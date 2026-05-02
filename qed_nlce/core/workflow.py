@@ -35,6 +35,7 @@ import sys
 from typing import Optional
 
 from .ed_runner import build_ed_command, run_ed_subprocess
+from .qed_backend import can_run_in_process, qed_available, run_ed_in_process
 from .geometry import Geometry
 from .io import (
     ClusterEntry,
@@ -57,6 +58,14 @@ def _ed_worker(payload: tuple) -> bool:
         output_root=output_root,
         extra_env=extra_env,
         log_tag=log_tag,
+    )
+
+
+def _ed_inproc_worker(payload: tuple) -> bool:
+    """Pure function form of one in-process ED launch."""
+    (ham_subdir, output_dir, num_sites, options, log_tag) = payload
+    return run_ed_in_process(
+        ham_subdir, output_dir, num_sites, options, log_tag=log_tag,
     )
 
 
@@ -240,21 +249,36 @@ class NLCEWorkflow:
         logging.info("Step 3: Exact diagonalization (pipeline=%s)", self.pipeline.name)
         logging.info("=" * 80)
 
-        ed_executable = self.args.ed_executable
-        if not os.path.exists(ed_executable):
-            logging.error(
-                "ED executable not found at %s. Build the project first "
-                "(see exact_diagonalization_cpp/README.md), or pass "
-                "--ed_executable=<path>.",
-                ed_executable,
-            )
-            sys.exit(1)
+        # In-process backend selection. Three modes:
+        #   --in_process       : require qed package, error if not usable.
+        #   --auto_in_process  : prefer in-process, transparently fall back.
+        #   (default)          : subprocess only (legacy behavior).
+        in_process = bool(getattr(self.args, "in_process", False))
+        auto_in_process = bool(getattr(self.args, "auto_in_process", False))
+        use_inproc_default = in_process or auto_in_process
 
+        if use_inproc_default and not qed_available():
+            if in_process:
+                logging.error(
+                    "--in_process requires the 'qed' Python package "
+                    "(install via `pip install qed_nlce[qed]` or `pip install qed`)."
+                )
+                sys.exit(1)
+            logging.warning(
+                "--auto_in_process: qed package not importable; "
+                "falling back to ./ED subprocess for all clusters."
+            )
+            use_inproc_default = False
+
+        ed_executable = self.args.ed_executable
+        # Only require the ED binary if at least one cluster will use it.
+        # We re-check below per-cluster.
         scalapack_threshold = getattr(self.args, "scalapack_threshold", 16)
         use_scalapack = not getattr(self.args, "no_scalapack", False)
 
         # Build all ED jobs up front so we can use a Pool cleanly.
-        jobs: list[tuple] = []
+        subprocess_jobs: list[tuple] = []
+        inproc_jobs: list[tuple] = []
         for cluster in clusters:
             ham_subdir = self._ham_subdir_for(cluster)
             ed_subdir = self._ed_subdir_for(cluster)
@@ -268,38 +292,94 @@ class NLCEWorkflow:
                 continue
 
             options = self.pipeline.make_ed_options(self.args, num_sites)
-            cmd = build_ed_command(
-                ed_executable=ed_executable,
-                ham_subdir=ham_subdir,
-                output_dir=ed_subdir,
-                num_sites=num_sites,
-                options=options,
-                scalapack_threshold=scalapack_threshold,
-                use_scalapack=use_scalapack,
-            )
-            extra_env = self.pipeline.extra_env(self.args, num_sites)
-            log_tag = f"{self.pipeline.name}:cluster_{cluster.cluster_id}"
-            jobs.append((cmd, ed_subdir, extra_env, log_tag))
 
-        if not jobs:
+            # Decide per-cluster whether to use the in-process backend.
+            # Auto-promotion to SCALAPACK_MIXED happens inside
+            # build_ed_command, so we have to anticipate that here.
+            promoted_method = options.method
+            if (
+                options.method.upper() == "FULL"
+                and use_scalapack
+                and num_sites >= scalapack_threshold
+            ):
+                promoted_method = "SCALAPACK_MIXED"
+
+            cluster_can_inproc = (
+                use_inproc_default and can_run_in_process(promoted_method)
+            )
+            log_tag = f"{self.pipeline.name}:cluster_{cluster.cluster_id}"
+
+            if cluster_can_inproc:
+                inproc_jobs.append(
+                    (ham_subdir, ed_subdir, num_sites, options, log_tag)
+                )
+            else:
+                if not os.path.exists(ed_executable):
+                    logging.error(
+                        "ED executable not found at %s. Build the project "
+                        "first (see https://github.com/ze-bang/QED), or pass "
+                        "--ed_executable=<path>, or set $QED_ED_BINARY.",
+                        ed_executable,
+                    )
+                    sys.exit(1)
+                cmd = build_ed_command(
+                    ed_executable=ed_executable,
+                    ham_subdir=ham_subdir,
+                    output_dir=ed_subdir,
+                    num_sites=num_sites,
+                    options=options,
+                    scalapack_threshold=scalapack_threshold,
+                    use_scalapack=use_scalapack,
+                )
+                extra_env = self.pipeline.extra_env(self.args, num_sites)
+                subprocess_jobs.append((cmd, ed_subdir, extra_env, log_tag))
+
+        n_total = len(subprocess_jobs) + len(inproc_jobs)
+        if n_total == 0:
             logging.warning("No ED jobs to run.")
             return
 
-        if getattr(self.args, "parallel", False):
-            n = self.args.num_cores
-            logging.info("Running %d ED jobs in parallel with %d cores", len(jobs), n)
-            with multiprocessing.Pool(processes=n) as pool:
-                results = pool.map(_ed_worker, jobs)
-        else:
+        logging.info(
+            "ED job dispatch: %d in-process (qed), %d subprocess (./ED)",
+            len(inproc_jobs), len(subprocess_jobs),
+        )
+
+        results: list[bool] = []
+        parallel = getattr(self.args, "parallel", False)
+        n_cores = self.args.num_cores
+
+        # In-process jobs: run sequentially in the main interpreter to
+        # share the qed module + its CUDA / OpenMP runtime context. (A
+        # multiprocessing.Pool would re-import qed in every worker which
+        # defeats the purpose.) For small clusters this is still much
+        # faster than forking ./ED.
+        if inproc_jobs:
             try:
                 from tqdm import tqdm
-                iterable = tqdm(jobs, desc="Running ED")
+                iterable = tqdm(inproc_jobs, desc="ED in-process")
             except ImportError:
-                iterable = jobs
-            results = [_ed_worker(j) for j in iterable]
+                iterable = inproc_jobs
+            results.extend(_ed_inproc_worker(j) for j in iterable)
+
+        # Subprocess jobs: optionally parallel.
+        if subprocess_jobs:
+            if parallel:
+                logging.info(
+                    "Running %d subprocess ED jobs in parallel with %d cores",
+                    len(subprocess_jobs), n_cores,
+                )
+                with multiprocessing.Pool(processes=n_cores) as pool:
+                    results.extend(pool.map(_ed_worker, subprocess_jobs))
+            else:
+                try:
+                    from tqdm import tqdm
+                    iterable = tqdm(subprocess_jobs, desc="Running ED")
+                except ImportError:
+                    iterable = subprocess_jobs
+                results.extend(_ed_worker(j) for j in iterable)
 
         n_ok = sum(results)
-        logging.info("ED: %d / %d clusters succeeded", n_ok, len(jobs))
+        logging.info("ED: %d / %d clusters succeeded", n_ok, n_total)
 
     # ------------------------------------------------------------ step 4
 

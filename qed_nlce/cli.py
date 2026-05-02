@@ -96,6 +96,16 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     g.add_argument("--num_cores", type=int, default=multiprocessing.cpu_count(),
                    help="Cores for --parallel (default: all)")
 
+    # In-process backend (uses qed Python bindings; bypasses ./ED subprocess).
+    g.add_argument("--in_process", action="store_true",
+                   help="Run ED in-process via the qed Python bindings "
+                        "(requires `pip install qed`). Skips the ./ED "
+                        "subprocess entirely; fails if qed is not importable.")
+    g.add_argument("--auto_in_process", action="store_true",
+                   help="Prefer the in-process qed backend per cluster, but "
+                        "transparently fall back to ./ED for MPI-only methods "
+                        "(SCALAPACK*, mTPQ_MPI) or if qed is not importable.")
+
 
 def _print_listing() -> None:
     """``--list``: enumerate registered geometries and pipelines."""
@@ -195,9 +205,48 @@ def main(argv: Sequence[str] | None = None) -> int:
     # the FullED summation dispatch).
     args.geometry = pre_args.geometry
 
+    _preflight_build_introspection(args)
+
     workflow = NLCEWorkflow(geometry, pipeline, args)
     workflow.run()
     return 0
+
+
+def _preflight_build_introspection(args: argparse.Namespace) -> None:
+    """Warn/abort early if the user's method requires QED features that the
+    installed ``qed`` build (or the ``./ED`` binary's compile-time options)
+    cannot provide. Cheap; only runs when ``qed`` is importable.
+    """
+    method = (getattr(args, "method", "") or "").upper()
+    use_gpu_flag = bool(getattr(args, "use_gpu", False))
+    wants_gpu = use_gpu_flag or method.endswith("_GPU") or method == "MTPQ_CUDA"
+    wants_mpi = method.startswith("SCALAPACK") or method == "MTPQ_MPI"
+
+    try:
+        import qed  # type: ignore
+    except Exception:
+        return  # nothing to introspect
+
+    if wants_gpu and not qed.has_cuda_build():
+        print(
+            "warning: requested GPU method but the installed `qed` build "
+            "has no CUDA support (qed.has_cuda_build() == False). The "
+            "./ED subprocess may still succeed if it was built with CUDA, "
+            "but the in-process backend cannot.",
+            file=sys.stderr,
+        )
+    if wants_mpi and not qed.has_mpi_build():
+        print(
+            "warning: requested MPI method but the installed `qed` build "
+            "has no MPI support. ./ED will run as a single-rank process.",
+            file=sys.stderr,
+        )
+    if method.startswith("SCALAPACK") and not qed.has_scalapack_build():
+        print(
+            "warning: requested SCALAPACK method but the installed `qed` "
+            "build has no ScaLAPACK support; expect runtime failure.",
+            file=sys.stderr,
+        )
 
 
 if __name__ == "__main__":

@@ -31,11 +31,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# The QED Python bindings are only required for in-process workflows.
-# All NLCE pipelines invoke the standalone ``ED`` / ``ed_distributed_main``
-# binaries via subprocess, so a wheel install of qed gives you the binaries
-# on PATH (or set --ed_executable explicitly).
-qed = ["qed>=0.1.0"]
+# In-process backend: route per-cluster ED through the qed Python
+# bindings instead of forking ./ED. Hugely faster on workflows with
+# many small clusters (typical at high NLCE orders) because it skips
+# the subprocess fork + OpenMP/CUDA initialization per cluster.
+# Required for ``--in_process`` / ``--auto_in_process`` and for
+# build-introspection preflight on ``--method=FULL_GPU`` etc.
+qed = ["qed>=0.2.0"]
 dev = ["pytest>=7", "pytest-xdist>=3"]
 
 [project.scripts]

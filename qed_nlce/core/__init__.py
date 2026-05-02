@@ -30,7 +30,13 @@ from .ed_runner import (
     DEFAULT_ED_PATH,
     EDOptions,
     build_ed_command,
+    discover_ed_binary,
     run_ed_subprocess,
+)
+from .qed_backend import (
+    can_run_in_process,
+    qed_available,
+    run_ed_in_process,
 )
 from .io import (
     HAS_H5PY,
@@ -52,7 +58,12 @@ __all__ = [
     "DEFAULT_ED_PATH",
     "EDOptions",
     "build_ed_command",
+    "discover_ed_binary",
     "run_ed_subprocess",
+    # qed_backend (in-process)
+    "can_run_in_process",
+    "qed_available",
+    "run_ed_in_process",
     # io
     "HAS_H5PY",
     "ClusterEntry",
