@@ -296,3 +296,41 @@ NLCE Möbius condition number `κ ~ 30–80` is the crucial sanity check
 on any iterative backend: per-cluster relative error must be
 `<< 1 / κ ≈ 1–3%` to keep summed-`C(T)` error `< 30%`. KPM-DOS clears
 this comfortably; FTLM does not.
+
+---
+
+## 9. Resummation
+
+All four pipelines (`auto`, `full_ed`, `kpm_dos`, `ftlm`) accept
+`--resummation=<METHOD>`. The full unified vocabulary is:
+
+| Name | Family | Notes |
+| --- | --- | --- |
+| `auto` | meta | Pick best method by convergence diagnostics. |
+| `none`, `direct` | none | No acceleration; use highest order directly. |
+| `euler` | Euler | Best for alternating series. |
+| `wynn`, `shanks` | Wynn-ε | Default series-acceleration choice. |
+| `wynn_multi` | Wynn-ε | Multi-step Wynn (triangular kernel only). |
+| `pade` | Padé | Triangular kernel only; needs ≥ 4 orders. |
+| `aitken` | Aitken Δ² | Triangular kernel only. |
+| `theta`, `brezinski` | Brezinski-θ | |
+| `robust` | meta | Run several methods, cross-validate. |
+| `entropy_derived` | physics | Triangular only; derives `C(T)` from `S(T)`. |
+
+Cross-pipeline aliases are normalised inside each kernel — e.g.
+`--resummation=none` is accepted by `NLC_sum_ftlm.py` (mapped to
+`direct`), and `--resummation=theta` is accepted by
+`NLC_sum_triangular.py` (mapped to `brezinski`). You can use the same
+method-name vocabulary regardless of which pipeline runs underneath.
+
+The pyrochlore kernel (`NLC_sum.py`) and triangular kernel
+(`NLC_sum_triangular.py`) implement different native subsets; an alias
+map inside each kernel covers the rest. For best fidelity stick to
+each kernel's native vocabulary:
+
+* `NLC_sum_ftlm.py` (used by `auto`, `kpm_dos`, `ftlm`):
+  native = {auto, direct, euler, wynn, theta, robust}.
+* `NLC_sum_triangular.py` (used by `full_ed` on triangular):
+  native = {none, euler, wynn, wynn_multi, brezinski, aitken, pade, entropy_derived}.
+* `NLC_sum.py` (used by `full_ed` on pyrochlore):
+  native = {auto, direct, euler, wynn, shanks, aitken, pade}.

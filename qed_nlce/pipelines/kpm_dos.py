@@ -82,8 +82,13 @@ class KPMDOSPipeline(Pipeline):
         g.add_argument("--SI_units", action="store_true",
                        help="Convert NLCE-summation output to SI units")
         g.add_argument("--resummation", type=str, default="auto",
-                       choices=["auto", "direct", "euler", "wynn", "theta", "robust"],
-                       help="Resummation method for the summation kernel")
+                       choices=["auto", "direct", "none", "euler", "wynn",
+                                "theta", "robust", "shanks", "pade",
+                                "wynn_multi", "brezinski", "aitken",
+                                "entropy_derived"],
+                       help="Resummation method for the summation kernel "
+                            "(aliases: none==direct, shanks/pade/wynn_multi/aitken==wynn, "
+                            "brezinski==theta, entropy_derived==wynn)")
         g.add_argument("--quiet", "-q", action="store_true",
                        help="Disable verbose per-order output during summation")
         g.add_argument("--verbose_plot", action="store_true",

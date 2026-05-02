@@ -1323,7 +1323,10 @@ if __name__ == "__main__":
     parser.add_argument('--eigenvalue_dir', required=True, help='Directory containing eigenvalue files from ED calculations')
     parser.add_argument('--output_dir', default='.', help='Directory to save output files')
     parser.add_argument('--resummation_method', default='auto', 
-                       choices=['auto', 'direct', 'euler', 'wynn', 'shanks', 'aitken', 'pade'],
+                       choices=['auto', 'direct', 'none', 'euler', 'wynn',
+                                'shanks', 'aitken', 'pade', 'theta',
+                                'robust', 'wynn_multi', 'brezinski',
+                                'entropy_derived'],
                        help='Resummation method for series acceleration')
     parser.add_argument('--euler_resum', action='store_true', help='Use Euler resummation (deprecated, use --resummation_method euler)')
     parser.add_argument('--order_cutoff', type=int, help='Maximum order to include in summation')
@@ -1351,6 +1354,23 @@ if __name__ == "__main__":
     if args.euler_resum and resummation_method == 'auto':
         resummation_method = 'euler'
         print("Note: --euler_resum flag is deprecated, use --resummation_method euler instead")
+
+    # Cross-pipeline alias normalisation: this kernel implements a
+    # different subset than NLC_sum_ftlm / NLC_sum_triangular. Map any
+    # method name not natively supported onto its closest equivalent.
+    _RESUM_ALIAS = {
+        'none': 'direct',
+        'theta': 'wynn',          # no Brezinski theta in this kernel
+        'robust': 'auto',
+        'wynn_multi': 'wynn',
+        'brezinski': 'wynn',
+        'entropy_derived': 'wynn',
+    }
+    if resummation_method in _RESUM_ALIAS:
+        new = _RESUM_ALIAS[resummation_method]
+        print(f"Note: --resummation_method={resummation_method} mapped to '{new}' "
+              f"in the NLC_sum (pyrochlore) kernel.")
+        resummation_method = new
     
     # Run NLC calculation
     results = nlc.run(resummation_method=resummation_method, order_cutoff=args.order_cutoff, 

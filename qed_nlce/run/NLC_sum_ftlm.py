@@ -2975,14 +2975,18 @@ Example usage:
     parser.add_argument('--order_cutoff', type=int, 
                        help='Maximum order to include in summation')
     parser.add_argument('--resummation', type=str, default='auto',
-                       choices=['auto', 'direct', 'euler', 'wynn', 'theta', 'robust'],
+                       choices=['auto', 'direct', 'none', 'euler', 'wynn',
+                                'theta', 'robust', 'shanks', 'pade',
+                                'wynn_multi', 'brezinski', 'aitken',
+                                'entropy_derived'],
                        help='Resummation method for series acceleration (default: auto)\n'
                             'auto: automatically select based on convergence\n'
-                            'direct: no acceleration, use highest order\n'
+                            'direct, none: no acceleration, use highest order\n'
                             'euler: Euler transform (best for alternating series)\n'
-                            'wynn: Wynn epsilon algorithm (NLCE default)\n'
-                            'theta: Brezinski theta algorithm\n'
-                            'robust: run multiple methods and check agreement')
+                            'wynn, shanks, pade, wynn_multi, aitken: Wynn-epsilon family\n'
+                            'theta, brezinski: Brezinski theta algorithm\n'
+                            'robust: run multiple methods and check agreement\n'
+                            'entropy_derived: triangular-only; falls back to wynn here')
     parser.add_argument('--compare_methods', action='store_true',
                        help='Compare all resummation methods side-by-side')
     parser.add_argument('--euler_l', type=int, default=3,
@@ -3085,9 +3089,29 @@ Example usage:
         # Run comparison
         nlc.compare_resummation_methods(partial_sums_by_quantity, save_dir=args.output_dir)
     
+    # Normalise cross-pipeline resummation aliases so users can pick
+    # the same method name regardless of which kernel runs underneath
+    # (NLC_sum_ftlm, NLC_sum_triangular, NLC_sum). The wynn-family
+    # collapse here is intentional: this kernel only implements the
+    # core wynn-epsilon, not the multi-step / Pade variants exposed by
+    # NLC_sum_triangular.py.
+    _RESUM_ALIAS = {
+        'none': 'direct',
+        'shanks': 'wynn',
+        'pade': 'wynn',
+        'wynn_multi': 'wynn',
+        'aitken': 'wynn',
+        'brezinski': 'theta',
+        'entropy_derived': 'wynn',
+    }
+    _resum_normalised = _RESUM_ALIAS.get(args.resummation, args.resummation)
+    if _resum_normalised != args.resummation:
+        print(f"Note: --resummation={args.resummation} mapped to '{_resum_normalised}' "
+              f"in the NLC_sum_ftlm kernel.")
+
     # Run NLC calculation with selected method (and optional robust pipeline)
     results = nlc.sum_nlc(
-        resummation_method=args.resummation, 
+        resummation_method=_resum_normalised,
         order_cutoff=args.order_cutoff,
         use_robust_pipeline=args.robust_pipeline,
         verbose=verbose

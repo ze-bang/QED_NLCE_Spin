@@ -1114,10 +1114,14 @@ def main():
     parser.add_argument('--SI_units', action='store_true',
                        help='Convert to SI units: C,S in J/(mol·K), E in J/mol.')
     parser.add_argument('--resummation', type=str, default='none',
-                       choices=['none', 'euler', 'wynn', 'wynn_multi',
-                                'brezinski', 'aitken', 'pade', 'entropy_derived'],
+                       choices=['none', 'direct', 'auto', 'euler', 'wynn',
+                                'wynn_multi', 'brezinski', 'aitken', 'pade',
+                                'shanks', 'theta', 'robust',
+                                'entropy_derived'],
                        help='Resummation method: none, euler, wynn, wynn_multi, '
-                            'brezinski, aitken, pade, or entropy_derived')
+                            'brezinski, aitken, pade, or entropy_derived. '
+                            'Aliases: direct==none, shanks==wynn, theta==brezinski, '
+                            'robust==wynn, auto==euler.')
     
     args = parser.parse_args()
     
@@ -1179,9 +1183,23 @@ def main():
     
     # Perform summation
     print(f"\nPerforming NLCE summation up to order {max_order}...")
-    if args.resummation != 'none':
-        print(f"Using {args.resummation} resummation")
-        results = nlc.perform_resummed_summation(max_order, method=args.resummation)
+    # Cross-pipeline alias normalisation: map names that other kernels
+    # expose (e.g. 'direct', 'shanks', 'theta', 'robust', 'auto') onto
+    # this kernel's native vocabulary.
+    _RESUM_ALIAS = {
+        'direct': 'none',
+        'auto': 'euler',
+        'shanks': 'wynn',
+        'theta': 'brezinski',
+        'robust': 'wynn',
+    }
+    resum = _RESUM_ALIAS.get(args.resummation, args.resummation)
+    if resum != args.resummation:
+        print(f"Note: --resummation={args.resummation} mapped to '{resum}' "
+              f"in the NLC_sum_triangular kernel.")
+    if resum != 'none':
+        print(f"Using {resum} resummation")
+        results = nlc.perform_resummed_summation(max_order, method=resum)
     else:
         results = nlc.perform_summation(max_order)
     
