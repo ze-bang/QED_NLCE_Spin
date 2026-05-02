@@ -11,17 +11,15 @@ package was renamed `workflows.nlce` → `qed_nlce`.
 ## Install
 
 ```bash
-# 1. Install the QED toolkit first (provides the ./ED and
-#    ed_distributed_main binaries + the optional qed Python wheel
-#    that powers the in-process backend). See
-#    https://github.com/ze-bang/QED for instructions; in short:
+# Install the QED toolkit. The qed Python wheel is a *required*
+# dependency of qed_nlce -- the in-process backend imports it
+# directly. The ./ED binary is also required as a fallback for
+# MPI-only methods (SCALAPACK*, mTPQ_MPI).
 git clone https://github.com/ze-bang/QED.git
 cd QED && pip install . && cmake --preset release && cmake --build build -j
 
-# 2. Install qed_nlce (this repo). Use the [qed] extra to also pull
-#    the qed Python bindings -- required only for --in_process /
-#    --auto_in_process and the build-introspection preflight.
-pip install "git+https://github.com/ze-bang/QED_NLCE.git#egg=qed_nlce[qed]"
+# Then install qed_nlce. Pip will pick up the qed dep automatically.
+pip install git+https://github.com/ze-bang/QED_NLCE.git
 ```
 
 The `ED` binary is auto-discovered in this order:
@@ -31,7 +29,7 @@ The `ED` binary is auto-discovered in this order:
    `cmake --install`).
 3. `./build/ED`, `../QED/build/ED`, `../../QED/build/ED`.
 4. `$VIRTUAL_ENV/bin/ED`.
-5. The install root of the optional `qed` Python package.
+5. The install root of the `qed` Python package.
 
 Override at any time with `--ed_executable <path>`.
 
@@ -44,11 +42,12 @@ qed-nlce --geometry pyrochlore --pipeline ftlm \
          --max_order 5 --ftlm_samples 30 \
          --base_dir output/pyro_ftlm_o5
 
-# In-process backend (skips the per-cluster ./ED fork; needs `pip
-# install qed_nlce[qed]`). Big win for high-order workflows where the
-# fork + OpenMP/CUDA init cost dominates the small-cluster ED runs.
+# By default qed_nlce runs each cluster in-process via
+# qed.exact_diagonalization_from_directory(...). Pass --no_in_process
+# to force every cluster through the ./ED subprocess (e.g. for
+# benchmarking the legacy path).
 qed-nlce --geometry triangular_site --pipeline full_ed \
-         --max_order 6 --auto_in_process \
+         --max_order 6 --no_in_process \
          --base_dir output/tri_full_o6
 ```
 
@@ -56,9 +55,8 @@ qed-nlce --geometry triangular_site --pipeline full_ed \
 
 | Mode (CLI) | Implementation | When to use |
 | --- | --- | --- |
-| (default) | Forks `./ED` per cluster (subprocess). | No `qed` Python wheel installed; or you need MPI / SCALAPACK methods. |
-| `--auto_in_process` | Per-cluster: in-process via `qed.exact_diagonalization_from_directory` when supported, transparent fallback to `./ED` for `SCALAPACK*` / `mTPQ_MPI`. | Recommended default once the `[qed]` extra is installed. |
-| `--in_process` | Hard-require the in-process backend; abort if `qed` is missing or method is MPI-only. | Reproducible benchmarks where the subprocess path must be excluded. |
+| (default) | Per-cluster in-process via `qed.exact_diagonalization_from_directory(...)`. MPI-only methods (`SCALAPACK*`, `mTPQ_MPI`) transparently fall back to `./ED`. | Recommended; eliminates the per-cluster fork + OpenMP / CUDA initialization overhead that dominates wall-time at high NLCE orders. |
+| `--no_in_process` | Forks `./ED` per cluster (legacy subprocess path). | Benchmarking the subprocess path, or when the qed wheel and the `./ED` binary were built with different feature flags. |
 
 ## Package layout
 
@@ -74,19 +72,22 @@ qed-nlce --geometry triangular_site --pipeline full_ed \
 
 ## Relationship to QED
 
-`qed_nlce` is a **runtime consumer** of the QED toolkit, not a build-time
-dependency. It does not link against any QED C++ library. Two execution
-paths are supported:
+`qed_nlce` depends on QED in two ways:
 
-1. **Subprocess** (zero Python deps on QED) — every cluster spawns
-   `./ED`. Works with any QED build (CPU, MPI, CUDA, ScaLAPACK).
-2. **In-process** (optional `[qed]` extra) — every cluster calls
-   `qed.exact_diagonalization_from_directory(...)` directly. Bypasses
-   the fork + OpenMP/CUDA initialization for each cluster, and gives
-   the workflow access to QED's Phase 7+ canonical 5-axis dispatcher
-   (orthogonal `use_gpu` / `use_mpi` / `use_fixed_sz` / `use_symmetry`
-   axes, build introspection via `qed.has_cuda_build()` /
-   `qed.has_mpi_build()` / `qed.has_scalapack_build()`).
+1. **Python**: it `import`s the `qed` Python package (a required
+   runtime dependency, declared in `pyproject.toml`). Every cluster's
+   ED is dispatched in-process via QED's Phase 7+ canonical 5-axis
+   dispatcher (orthogonal `use_gpu` / `use_mpi` / `use_fixed_sz` /
+   `use_symmetry` axes). `qed_nlce` does NOT link against any QED C++
+   library and does NOT have a build-time dependency on QED.
+2. **Subprocess**: for MPI-only methods (`SCALAPACK*`, `mTPQ_MPI`) it
+   shells out to the `./ED` binary, since a Python interpreter cannot
+   host `MPI_Init`. The same fallback kicks in if the user passes
+   `--no_in_process`.
+
+Build-introspection preflight uses `qed.has_cuda_build()` /
+`qed.has_mpi_build()` / `qed.has_scalapack_build()` to warn early when
+the requested method is incompatible with the installed `qed` build.
 
 ## License
 

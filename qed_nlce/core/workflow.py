@@ -249,30 +249,20 @@ class NLCEWorkflow:
         logging.info("Step 3: Exact diagonalization (pipeline=%s)", self.pipeline.name)
         logging.info("=" * 80)
 
-        # In-process backend selection. Three modes:
-        #   --in_process       : require qed package, error if not usable.
-        #   --auto_in_process  : prefer in-process, transparently fall back.
-        #   (default)          : subprocess only (legacy behavior).
-        in_process = bool(getattr(self.args, "in_process", False))
-        auto_in_process = bool(getattr(self.args, "auto_in_process", False))
-        use_inproc_default = in_process or auto_in_process
-
-        if use_inproc_default and not qed_available():
-            if in_process:
-                logging.error(
-                    "--in_process requires the 'qed' Python package "
-                    "(install via `pip install qed_nlce[qed]` or `pip install qed`)."
-                )
-                sys.exit(1)
+        # Backend selection. qed is a required dep, so the in-process
+        # backend is the default. --no_in_process forces every cluster
+        # through the ./ED subprocess; MPI-only methods (SCALAPACK*,
+        # mTPQ_MPI) always use the subprocess regardless.
+        force_subprocess = bool(getattr(self.args, "no_in_process", False))
+        use_inproc_default = not force_subprocess and qed_available()
+        if not force_subprocess and not qed_available():
             logging.warning(
-                "--auto_in_process: qed package not importable; "
-                "falling back to ./ED subprocess for all clusters."
+                "qed package not importable; falling back to ./ED "
+                "subprocess for all clusters. (qed is a required "
+                "dependency -- this should not normally happen.)"
             )
-            use_inproc_default = False
 
         ed_executable = self.args.ed_executable
-        # Only require the ED binary if at least one cluster will use it.
-        # We re-check below per-cluster.
         scalapack_threshold = getattr(self.args, "scalapack_threshold", 16)
         use_scalapack = not getattr(self.args, "no_scalapack", False)
 

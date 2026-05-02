@@ -21,6 +21,12 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
+    # qed is a *required* dep: NLCE pipelines call
+    # qed.exact_diagonalization_from_directory(...) in-process by
+    # default. The ./ED subprocess path remains as a fallback for
+    # MPI-only methods (SCALAPACK*, mTPQ_MPI), but is no longer
+    # the primary execution mode.
+    "qed>=0.2.0",
     "numpy>=1.23",
     "scipy>=1.10",
     "h5py>=3.7",
@@ -31,13 +37,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# In-process backend: route per-cluster ED through the qed Python
-# bindings instead of forking ./ED. Hugely faster on workflows with
-# many small clusters (typical at high NLCE orders) because it skips
-# the subprocess fork + OpenMP/CUDA initialization per cluster.
-# Required for ``--in_process`` / ``--auto_in_process`` and for
-# build-introspection preflight on ``--method=FULL_GPU`` etc.
-qed = ["qed>=0.2.0"]
 dev = ["pytest>=7", "pytest-xdist>=3"]
 
 [project.scripts]

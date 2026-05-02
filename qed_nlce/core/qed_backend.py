@@ -33,16 +33,19 @@ import logging
 import os
 from typing import Optional
 
+import qed
+
 from .ed_runner import EDOptions
 
 
 def qed_available() -> bool:
-    """True iff the ``qed`` Python package is importable."""
-    try:
-        import qed  # noqa: F401
-        return True
-    except Exception:
-        return False
+    """True iff the ``qed`` Python package is importable.
+
+    Always True under normal installations (``qed`` is a required
+    dependency declared in ``pyproject.toml``). Kept as a function so
+    downstream code can still defensively gate on it.
+    """
+    return True
 
 
 # Method names that have a clean in-process Python equivalent.
@@ -81,8 +84,6 @@ def can_run_in_process(method: str) -> bool:
 
 def _resolve_method(method_name: str):
     """Map an NLCE method string to (DiagonalizationMethod, use_gpu, use_fixed_sz)."""
-    import qed  # local import: only needed when actually dispatching
-
     m = method_name.upper()
     use_gpu = False
     use_fixed_sz = False
@@ -130,12 +131,6 @@ def run_ed_in_process(
     Returns True on success, False otherwise. Mirrors the contract of
     :func:`qed_nlce.core.run_ed_subprocess`.
     """
-    try:
-        import qed
-    except ImportError:
-        logging.error("[%s] qed package not importable -- cannot run in-process.", log_tag)
-        return False
-
     method_enum, use_gpu, use_fixed_sz = _resolve_method(options.method)
 
     # Build-introspection guard (cheap, helpful diagnostics).

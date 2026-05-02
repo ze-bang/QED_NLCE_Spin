@@ -53,15 +53,20 @@ def test_discover_ed_binary_falls_back_to_path(tmp_path, monkeypatch):
 
 def test_discover_ed_binary_returns_none_when_missing(tmp_path, monkeypatch):
     from qed_nlce.core import ed_runner
+    import qed as _qed
 
-    monkeypatch.delenv("QED_ED_BINARY", raising=False)
-    monkeypatch.delenv("ED_BINARY", raising=False)
-    monkeypatch.setenv("PATH", str(tmp_path))  # empty
+    monkeypatch.delenv('QED_ED_BINARY', raising=False)
+    monkeypatch.delenv('ED_BINARY', raising=False)
+    monkeypatch.setenv('PATH', str(tmp_path))  # empty
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
-    # Pretend qed package is not importable so the last-resort branch
-    # does not produce a hit.
-    with mock.patch.dict(sys.modules, {"qed": None}):
+    monkeypatch.delenv('VIRTUAL_ENV', raising=False)
+    # Force the qed-package fallback to point at a tmp dir with no ED
+    # binary so the last-resort branch finds nothing either.
+    fake_qed_dir = tmp_path / 'fake_qed'
+    fake_qed_dir.mkdir()
+    fake_init = fake_qed_dir / '__init__.py'
+    fake_init.write_text('')
+    with mock.patch.object(_qed, '__file__', str(fake_init)):
         assert ed_runner.discover_ed_binary() is None
 
 
@@ -88,10 +93,10 @@ def test_can_run_in_process_rejects_mpi_only_methods():
     assert not qed_backend.can_run_in_process("BOGUS_METHOD_NAME")
 
 
-def test_qed_available_does_not_crash():
+def test_qed_available_returns_true():
+    """qed is a required dep -- must always be importable."""
     from qed_nlce.core import qed_backend
-    # Should be a clean True/False; no exception even if qed missing.
-    assert isinstance(qed_backend.qed_available(), bool)
+    assert qed_backend.qed_available() is True
 
 
 # ---------------------------------------------------------------------------
@@ -100,21 +105,20 @@ def test_qed_available_does_not_crash():
 
 
 def test_cli_recognizes_in_process_flags():
-    """``--in_process`` / ``--auto_in_process`` must be valid CLI flags."""
+    """``--no_in_process`` (subprocess opt-out) must be a valid CLI flag.
+    Legacy ``--in_process`` / ``--auto_in_process`` are kept as silent aliases.
+    """
     from qed_nlce import cli
 
-    parser = __import__("argparse").ArgumentParser()
+    parser = __import__('argparse').ArgumentParser()
     cli._add_common_arguments(parser)
 
-    args = parser.parse_args([
-        "--max_order", "3",
-        "--auto_in_process",
-    ])
-    assert args.auto_in_process is True
-    assert args.in_process is False
+    args = parser.parse_args(['--max_order', '3', '--no_in_process'])
+    assert args.no_in_process is True
 
+    # Legacy aliases still parse cleanly.
     args = parser.parse_args([
-        "--max_order", "3",
-        "--in_process",
+        '--max_order', '3', '--in_process', '--auto_in_process',
     ])
     assert args.in_process is True
+    assert args.auto_in_process is True

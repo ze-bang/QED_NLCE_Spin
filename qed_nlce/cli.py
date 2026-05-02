@@ -37,20 +37,14 @@ from __future__ import annotations
 
 import argparse
 import multiprocessing
-import os
 import sys
 from typing import Sequence
 
-# Make `qed_nlce` importable when this file is run directly.
-_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
-
 # Importing the geometry / pipeline subpackages triggers their
 # registration side-effects.
-from qed_nlce import geometries as _geom_pkg  # noqa: F401, E402
-from qed_nlce import pipelines as _pipe_pkg  # noqa: F401, E402
-from qed_nlce.core import (  # noqa: E402
+from qed_nlce import geometries as _geom_pkg  # noqa: F401
+from qed_nlce import pipelines as _pipe_pkg  # noqa: F401
+from qed_nlce.core import (
     DEFAULT_ED_PATH,
     NLCEWorkflow,
     get_geometry,
@@ -96,15 +90,20 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     g.add_argument("--num_cores", type=int, default=multiprocessing.cpu_count(),
                    help="Cores for --parallel (default: all)")
 
-    # In-process backend (uses qed Python bindings; bypasses ./ED subprocess).
+    # Backend selection. qed_nlce defaults to the in-process qed
+    # backend (qed is a required dep). Use --no_in_process to force
+    # every cluster through the ./ED subprocess (e.g. for benchmarking
+    # the legacy path, or when the qed wheel and the ./ED binary were
+    # built with different feature flags). MPI-only methods
+    # (SCALAPACK*, mTPQ_MPI) ALWAYS use the subprocess regardless.
+    g.add_argument("--no_in_process", action="store_true",
+                   help="Disable the in-process qed backend; route every "
+                        "cluster through the ./ED subprocess.")
+    # Back-compat aliases (kept silent in --help except for advanced users).
     g.add_argument("--in_process", action="store_true",
-                   help="Run ED in-process via the qed Python bindings "
-                        "(requires `pip install qed`). Skips the ./ED "
-                        "subprocess entirely; fails if qed is not importable.")
+                   help=argparse.SUPPRESS)
     g.add_argument("--auto_in_process", action="store_true",
-                   help="Prefer the in-process qed backend per cluster, but "
-                        "transparently fall back to ./ED for MPI-only methods "
-                        "(SCALAPACK*, mTPQ_MPI) or if qed is not importable.")
+                   help=argparse.SUPPRESS)
 
 
 def _print_listing() -> None:
@@ -213,19 +212,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _preflight_build_introspection(args: argparse.Namespace) -> None:
-    """Warn/abort early if the user's method requires QED features that the
+    """Warn early if the user's method requires QED features that the
     installed ``qed`` build (or the ``./ED`` binary's compile-time options)
-    cannot provide. Cheap; only runs when ``qed`` is importable.
+    cannot provide.
     """
+    import qed  # required dep; safe to import at call site
+
     method = (getattr(args, "method", "") or "").upper()
     use_gpu_flag = bool(getattr(args, "use_gpu", False))
     wants_gpu = use_gpu_flag or method.endswith("_GPU") or method == "MTPQ_CUDA"
     wants_mpi = method.startswith("SCALAPACK") or method == "MTPQ_MPI"
-
-    try:
-        import qed  # type: ignore
-    except Exception:
-        return  # nothing to introspect
 
     if wants_gpu and not qed.has_cuda_build():
         print(
