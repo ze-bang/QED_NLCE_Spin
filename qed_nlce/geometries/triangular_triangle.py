@@ -7,7 +7,7 @@ slow.
 
 Wraps:
 
-* ``workflows/nlce/prep/generate_triangle_nlce_clusters.py``
+* ``qed_nlce/prep/generate_triangle_nlce_clusters.py``
 * ``python/edlib/helper_cluster_triangular.py`` (same helper as the
   site-based variant -- the cluster file format is identical, only
   the generator differs).

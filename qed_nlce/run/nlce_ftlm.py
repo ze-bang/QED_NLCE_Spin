@@ -6,7 +6,7 @@ Preserved for downstream analysis scripts (e.g.
 ``analysis/test_resummation_methods.py``) that invoke this file by
 path. For new work, use the unified CLI directly::
 
-    python -m workflows.nlce --geometry=pyrochlore --pipeline=ftlm --max_order=4 ...
+    python -m qed_nlce --geometry=pyrochlore --pipeline=ftlm --max_order=4 ...
 
 The translation layer below maps the legacy flag set onto the
 unified CLI's flags. The only non-trivial rename is
@@ -23,7 +23,7 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..",
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from workflows.nlce.cli import main as unified_main  # noqa: E402
+from qed_nlce.cli import main as unified_main  # noqa: E402
 
 
 def _translate_argv(argv: list[str]) -> list[str]:

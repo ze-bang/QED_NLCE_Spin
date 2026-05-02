@@ -6,12 +6,12 @@ research code is expected to subclass against:
 * :class:`Geometry` -- describes a lattice (which generator to invoke,
   which Hamiltonian helper to invoke, which model parameters are
   meaningful). One concrete subclass per supported lattice lives in
-  ``workflows.nlce.geometries``.
+  ``qed_nlce.geometries``.
 
 * :class:`Pipeline` -- describes an ED strategy (which `./ED` method
   to use, which extra CLI flags to thread through, which NLCE
   summation kernel to call afterwards). One concrete subclass per
-  ED strategy lives in ``workflows.nlce.pipelines``.
+  ED strategy lives in ``qed_nlce.pipelines``.
 
 * :class:`NLCEWorkflow` -- composes one ``Geometry`` × one ``Pipeline``
   and runs the canonical four-step pipeline (clusters → Hamiltonians

@@ -1,4 +1,4 @@
-# `workflows.nlce` — standalone NLCE package
+# `qed_nlce` — standalone NLCE package
 
 A modern, plugin-architecture Numerical Linked Cluster Expansion (NLCE)
 package built on top of the C++ `./ED` toolkit. One unified CLI; one
@@ -7,7 +7,7 @@ combination produces one workflow.
 
 ```
                                  ┌───────────────────┐
-                                 │   workflows.nlce  │
+                                 │   qed_nlce  │
                                  │   (unified CLI)   │
                                  └─────────┬─────────┘
                                            │
@@ -33,35 +33,35 @@ combination produces one workflow.
 
 ```bash
 # List all registered geometries and pipelines
-python -m workflows.nlce --list
+python -m qed_nlce --list
 
 # Pyrochlore, full ED, max_order=4
-python -m workflows.nlce \
+python -m qed_nlce \
     --geometry=pyrochlore --pipeline=full_ed \
     --max_order=4 --base_dir=runs/pyro_full --thermo
 
 # Pyrochlore, FTLM with hybrid full-ED for small clusters, GPU
-python -m workflows.nlce \
+python -m qed_nlce \
     --geometry=pyrochlore --pipeline=ftlm \
     --max_order=5 --use_gpu --hybrid_threshold=10 \
     --base_dir=runs/pyro_ftlm
 
 # Triangular triangle-based, Lanczos-boosted, with J1-J2 XXZ
-python -m workflows.nlce \
+python -m qed_nlce \
     --geometry=triangular_triangle --pipeline=lanczos_boost \
     --max_order=4 --J1=1.0 --J2=0.5 \
     --base_dir=runs/tri_lb
 
 # Help for a specific (geometry, pipeline) combination
-python -m workflows.nlce --geometry=pyrochlore --pipeline=ftlm --help
+python -m qed_nlce --geometry=pyrochlore --pipeline=ftlm --help
 ```
 
 ## Layout
 
 ```
-workflows/nlce/
+qed_nlce/
 ├── __init__.py              # auto-discovers geometries and pipelines
-├── __main__.py              # makes `python -m workflows.nlce` work
+├── __main__.py              # makes `python -m qed_nlce` work
 ├── cli.py                   # the unified CLI (parses --geometry / --pipeline)
 ├── _common.py               # legacy compat shim (re-exports from core/)
 │
@@ -120,10 +120,10 @@ dedicated kernels regardless of geometry.
 ## Programmatic use
 
 ```python
-from workflows.nlce.core import (
+from qed_nlce.core import (
     NLCEWorkflow, get_geometry, get_pipeline, list_geometries, list_pipelines,
 )
-import workflows.nlce  # triggers registration of all bundled extensions
+import qed_nlce  # triggers registration of all bundled extensions
 
 print(list_geometries())   # ['pyrochlore', 'triangular_site', 'triangular_triangle']
 print(list_pipelines())    # ['ftlm', 'full_ed', 'lanczos_boost']
@@ -135,7 +135,7 @@ pipe = get_pipeline("ftlm")
 NLCEWorkflow(geom, pipe, args).run()
 ```
 
-The :class:`workflows.nlce.core.EDOptions` /
+The :class:`qed_nlce.core.EDOptions` /
 :func:`build_ed_command` / :func:`run_ed_subprocess` triple is the only
 legal way for a `Pipeline` to talk to the C++ `./ED` binary. Centralising
 this means CLI flag changes only need to be audited in one place.
@@ -143,7 +143,7 @@ this means CLI flag changes only need to be audited in one place.
 ## Adding a new geometry
 
 ```python
-# workflows/nlce/geometries/kagome.py
+# qed_nlce/geometries/kagome.py
 from ..core import Geometry, register_geometry
 
 @register_geometry
@@ -177,7 +177,7 @@ whole integration — every existing pipeline (`full_ed`, `ftlm`,
 ## Adding a new pipeline
 
 ```python
-# workflows/nlce/pipelines/mtpq.py
+# qed_nlce/pipelines/mtpq.py
 from ..core import EDOptions, Pipeline, register_pipeline
 
 @register_pipeline
@@ -246,24 +246,24 @@ each) that translate the historical CLI surface onto the unified CLI:
 
 | legacy invocation                                           | unified CLI translation                                              |
 |-------------------------------------------------------------|----------------------------------------------------------------------|
-| `python workflows/nlce/run/nlce.py --max_order=4 ...`       | `--geometry=pyrochlore --pipeline=full_ed --max_order=4 ...`         |
-| `python workflows/nlce/run/nlce.py --lanczos_boost ...`     | `--geometry=pyrochlore --pipeline=lanczos_boost ...`                 |
-| `python workflows/nlce/run/nlce_ftlm.py --skip_ftlm ...`    | `--geometry=pyrochlore --pipeline=ftlm --skip_ed ...`                |
-| `python workflows/nlce/run/nlce_triangular.py ...`          | `--geometry=triangular_triangle --pipeline=full_ed ...`              |
-| `python workflows/nlce/run/nlce_triangular.py --site_based` | `--geometry=triangular_site --pipeline=full_ed ...`                  |
+| `python qed_nlce/run/nlce.py --max_order=4 ...`       | `--geometry=pyrochlore --pipeline=full_ed --max_order=4 ...`         |
+| `python qed_nlce/run/nlce.py --lanczos_boost ...`     | `--geometry=pyrochlore --pipeline=lanczos_boost ...`                 |
+| `python qed_nlce/run/nlce_ftlm.py --skip_ftlm ...`    | `--geometry=pyrochlore --pipeline=ftlm --skip_ed ...`                |
+| `python qed_nlce/run/nlce_triangular.py ...`          | `--geometry=triangular_triangle --pipeline=full_ed ...`              |
+| `python qed_nlce/run/nlce_triangular.py --site_based` | `--geometry=triangular_site --pipeline=full_ed ...`                  |
 
 Existing analysis scripts in `analysis/` that invoke these by path
 (`nlc_convergence*.py`, `nlce_ftlm_convergence.py`, `nlc_fit*.py`, …)
 continue to work unchanged.
 
-For the legacy `from workflows.nlce._common import EDOptions, ...`
+For the legacy `from qed_nlce._common import EDOptions, ...`
 import path, `_common.py` is now a re-export shim of
-`workflows.nlce.core`, so existing scripts that bind these symbols
+`qed_nlce.core`, so existing scripts that bind these symbols
 continue to work without changes.
 
 ## See also
 
-* `workflows/nlce/analysis/` — resummation diagnostics, NLCE fits,
+* `qed_nlce/analysis/` — resummation diagnostics, NLCE fits,
   convergence estimators.
 * `python/qed/` — in-process ED Python bindings (no
   subprocess overhead) for prototyping new observables.

@@ -1,4 +1,4 @@
-"""Module entry: ``python -m workflows.nlce`` dispatches to the unified CLI."""
+"""Module entry: ``python -m qed_nlce`` dispatches to the unified CLI."""
 
 from .cli import main
 

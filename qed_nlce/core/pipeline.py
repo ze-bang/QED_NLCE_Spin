@@ -11,7 +11,7 @@ Lanczos-boosted eigensolve, FTLM, mTPQ, ...). It owns:
     into an :class:`EDOptions`;
   * which NLCE-summation kernel to invoke after ED finishes.
 
-Concrete subclasses live in ``workflows.nlce.pipelines`` and register
+Concrete subclasses live in ``qed_nlce.pipelines`` and register
 themselves with :func:`register_pipeline`.
 """
 
@@ -125,7 +125,7 @@ def get_pipeline(name: str) -> Pipeline:
     if name not in _REGISTRY:
         raise KeyError(
             f"Unknown pipeline {name!r}. Available: {sorted(_REGISTRY)}. "
-            f"Did you forget to ``import workflows.nlce.pipelines``?"
+            f"Did you forget to ``import qed_nlce.pipelines``?"
         )
     return _REGISTRY[name]()
 

@@ -1,0 +1,43 @@
+# =============================================================================
+# .gitignore for qed_nlce
+# =============================================================================
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+wheels/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editor / OS noise
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# NLCE run outputs (per-job dirs created under arbitrary names)
+output/
+nlce_*/
+ed_results.h5
+*.h5
+
+# Logs
+*.log

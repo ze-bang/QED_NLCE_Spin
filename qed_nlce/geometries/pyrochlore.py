@@ -2,7 +2,7 @@
 
 Wraps two existing scripts:
 
-* ``workflows/nlce/prep/generate_pyrochlore_clusters.py`` for cluster
+* ``qed_nlce/prep/generate_pyrochlore_clusters.py`` for cluster
   generation (orbits of tetrahedra),
 * ``python/edlib/helper_cluster.py`` for per-cluster Hamiltonian
   preparation (XYZ + Zeeman + optional random transverse field).

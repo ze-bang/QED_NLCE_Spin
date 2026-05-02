@@ -6,7 +6,7 @@ formulated on the triangular lattice.
 
 Wraps:
 
-* ``workflows/nlce/prep/generate_triangular_clusters.py``
+* ``qed_nlce/prep/generate_triangular_clusters.py``
 * ``python/edlib/helper_cluster_triangular.py``
 
 Models supported:

@@ -1,4 +1,4 @@
-"""Unified NLCE CLI: ``python -m workflows.nlce`` (or ``workflows.nlce.cli``).
+"""Unified NLCE CLI: ``python -m qed_nlce`` (or ``qed_nlce.cli``).
 
 The canonical entry point. Selects exactly one Geometry and one
 Pipeline at the command line; the chosen pair injects its own
@@ -8,29 +8,29 @@ pipeline steps.
 Quick examples::
 
     # Pyrochlore, full ED, max_order=4
-    python -m workflows.nlce \
+    python -m qed_nlce \
         --geometry=pyrochlore --pipeline=full_ed \
         --max_order=4 --base_dir=runs/pyro_full
 
     # Pyrochlore, FTLM with hybrid full-ED, max_order=5, GPU
-    python -m workflows.nlce \
+    python -m qed_nlce \
         --geometry=pyrochlore --pipeline=ftlm \
         --max_order=5 --use_gpu --hybrid_threshold=10 \
         --base_dir=runs/pyro_ftlm
 
     # Triangular triangle-based, Lanczos-boost
-    python -m workflows.nlce \
+    python -m qed_nlce \
         --geometry=triangular_triangle --pipeline=lanczos_boost \
         --max_order=4 --J1=1.0 --J2=0.5 \
         --base_dir=runs/tri_lb
 
     # List all registered geometries / pipelines
-    python -m workflows.nlce --list
+    python -m qed_nlce --list
 
 To see a full help including the geometry- and pipeline-specific
 flags, you must specify both first::
 
-    python -m workflows.nlce --geometry=pyrochlore --pipeline=ftlm --help
+    python -m qed_nlce --geometry=pyrochlore --pipeline=ftlm --help
 """
 
 from __future__ import annotations
@@ -41,16 +41,16 @@ import os
 import sys
 from typing import Sequence
 
-# Make `workflows.nlce` importable when this file is run directly.
+# Make `qed_nlce` importable when this file is run directly.
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 # Importing the geometry / pipeline subpackages triggers their
 # registration side-effects.
-from workflows.nlce import geometries as _geom_pkg  # noqa: F401, E402
-from workflows.nlce import pipelines as _pipe_pkg  # noqa: F401, E402
-from workflows.nlce.core import (  # noqa: E402
+from qed_nlce import geometries as _geom_pkg  # noqa: F401, E402
+from qed_nlce import pipelines as _pipe_pkg  # noqa: F401, E402
+from qed_nlce.core import (  # noqa: E402
     DEFAULT_ED_PATH,
     NLCEWorkflow,
     get_geometry,
@@ -137,7 +137,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # parser with just the selectors + common args so --help is
         # informative.
         parser = argparse.ArgumentParser(
-            prog="workflows.nlce",
+            prog="qed_nlce",
             description=__doc__,
             formatter_class=argparse.RawDescriptionHelpFormatter,
         )
@@ -159,7 +159,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     pipeline = get_pipeline(pre_args.pipeline)
 
     parser = argparse.ArgumentParser(
-        prog="workflows.nlce",
+        prog="qed_nlce",
         description=(
             f"NLCE workflow:  geometry={pre_args.geometry}  "
             f"pipeline={pre_args.pipeline}\n\n{__doc__}"

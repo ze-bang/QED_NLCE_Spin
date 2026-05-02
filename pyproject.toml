@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools_scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qed_nlce"
+version = "0.1.0"
+description = "Numerical Linked Cluster Expansion (NLCE) workflow built on top of the QED exact-diagonalization toolkit."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+    { name = "QED collaborators" },
+]
+keywords = ["nlce", "exact-diagonalization", "quantum", "spin-models", "frustrated-magnetism"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+    "numpy>=1.23",
+    "scipy>=1.10",
+    "h5py>=3.7",
+    "matplotlib>=3.6",
+    "networkx>=3.0",
+    "pandas>=1.5",
+    "tqdm>=4.64",
+]
+
+[project.optional-dependencies]
+# The QED Python bindings are only required for in-process workflows.
+# All NLCE pipelines invoke the standalone ``ED`` / ``ed_distributed_main``
+# binaries via subprocess, so a wheel install of qed gives you the binaries
+# on PATH (or set --ed_executable explicitly).
+qed = ["qed>=0.1.0"]
+dev = ["pytest>=7", "pytest-xdist>=3"]
+
+[project.scripts]
+qed-nlce = "qed_nlce.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/ze-bang/QED_NLCE"
+Source = "https://github.com/ze-bang/QED_NLCE"
+"Bug Tracker" = "https://github.com/ze-bang/QED_NLCE/issues"
+"QED toolkit" = "https://github.com/ze-bang/QED"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["qed_nlce*"]
+exclude = ["tests*"]

@@ -14,7 +14,7 @@ Method: Full Exact Diagonalization + NLCE Summation
 
 Step 1: Run Complete Workflow
 ------------------------------
-python workflows/nlce/run/nlce.py \\
+python qed_nlce/run/nlce.py \\
     --max_order 4 \\
     --base_dir nlce_results \\
     --method FULL \\
@@ -28,7 +28,7 @@ Output: eigenvalues for each cluster → compute thermodynamics → NLCE sum
 
 Step 2: Fit to Experimental Data
 ---------------------------------
-python workflows/nlce/analysis/nlc_fit.py \\
+python qed_nlce/analysis/nlc_fit.py \\
     --exp_data_files experimental_cv.txt \\
     --max_order 4 \\
     --output_dir fit_results \\
@@ -59,7 +59,7 @@ Method: Finite Temperature Lanczos Method + NLCE Summation
 
 Step 1: Run Complete Workflow
 ------------------------------
-python workflows/nlce/run/nlce_ftlm.py \\
+python qed_nlce/run/nlce_ftlm.py \\
     --max_order 4 \\
     --base_dir nlce_ftlm_results \\
     --ftlm_samples 30 \\
@@ -74,7 +74,7 @@ Output: FTLM thermodynamics (with errors) for each cluster → NLCE sum
 
 Step 2: Fit to Experimental Data
 ---------------------------------
-python workflows/nlce/analysis/nlc_fit_ftlm.py \\
+python qed_nlce/analysis/nlc_fit_ftlm.py \\
     --exp_data experimental_cv.txt \\
     --max_order 4 \\
     --output_dir fit_results \\
@@ -210,7 +210,7 @@ If you have existing Standard NLCE results and want to switch to FTLM:
 
 2. Re-run with FTLM:
    ------------------
-   python workflows/nlce/run/nlce_ftlm.py \\
+   python qed_nlce/run/nlce_ftlm.py \\
        --max_order 4 \\
        --base_dir nlce_ftlm_results \\
        --skip_cluster_gen \\  # Reuse existing clusters
@@ -226,8 +226,8 @@ If you have existing Standard NLCE results and want to switch to FTLM:
 
 4. Update fitting scripts:
    ------------------------
-   OLD: python workflows/nlce/analysis/nlc_fit.py ...
-   NEW: python workflows/nlce/analysis/nlc_fit_ftlm.py ...
+   OLD: python qed_nlce/analysis/nlc_fit.py ...
+   NEW: python qed_nlce/analysis/nlc_fit_ftlm.py ...
    
    Command-line arguments are similar but add:
      --ftlm_samples 30
@@ -253,7 +253,7 @@ if __name__ == "__main__":
 Try FTLM with a small example:
 
   # 1. Run FTLM-based NLCE (should take ~10-30 minutes)
-  python workflows/nlce/run/nlce_ftlm.py --max_order 3 --ftlm_samples 20 --parallel
+  python qed_nlce/run/nlce_ftlm.py --max_order 3 --ftlm_samples 20 --parallel
 
   # 2. Check results
   ls nlce_ftlm_results/nlc_results_order_3/
@@ -262,7 +262,7 @@ Try FTLM with a small example:
   cat nlce_ftlm_results/nlc_results_order_3/nlc_specific_heat.txt
 
 For more details, see:
-  - workflows/nlce/README.md (comprehensive guide)
+  - qed_nlce/README.md (comprehensive guide)
   - examples/ (example configurations)
   
 """)

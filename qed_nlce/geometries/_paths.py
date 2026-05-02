@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import os
 
-# This file lives in workflows/nlce/geometries/_paths.py
+# This file lives in qed_nlce/geometries/_paths.py
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# workflows/nlce/
+# qed_nlce/
 NLCE_DIR = os.path.dirname(_THIS_DIR)
 # workflows/
 WORKFLOWS_DIR = os.path.dirname(NLCE_DIR)
@@ -42,7 +42,7 @@ TRIANGULAR_TRIANGLE_HELPER = os.path.join(
 )
 
 
-# ---- workflows/nlce/run/ scripts (NLCE summation kernels) ----
+# ---- qed_nlce/run/ scripts (NLCE summation kernels) ----
 
 RUN_DIR = os.path.join(NLCE_DIR, "run")
 

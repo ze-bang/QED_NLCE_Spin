@@ -42,7 +42,7 @@ def run_nlce_for_order(order, args):
     logging.info(f"="*80)
     
     # Build command for running nlce.py with current order
-    # Path is relative to the project root (workflows/nlce/run/nlce.py)
+    # Path is relative to the project root (qed_nlce/run/nlce.py)
     script_dir = os.path.dirname(os.path.abspath(__file__))
     nlce_script = os.path.join(script_dir, '..', 'run', 'nlce.py')
     

@@ -13,9 +13,9 @@ honeycomb, kagome, ...). It owns:
     to every geometry, but each generator writes its own subtree);
   * sensible default temperature ranges.
 
-Concrete subclasses live in ``workflows.nlce.geometries`` and register
+Concrete subclasses live in ``qed_nlce.geometries`` and register
 themselves with :func:`register_geometry`. Importing
-``workflows.nlce.geometries`` triggers all registrations.
+``qed_nlce.geometries`` triggers all registrations.
 """
 
 from __future__ import annotations
@@ -168,7 +168,7 @@ def get_geometry(name: str) -> Geometry:
     if name not in _REGISTRY:
         raise KeyError(
             f"Unknown geometry {name!r}. Available: {sorted(_REGISTRY)}. "
-            f"Did you forget to ``import workflows.nlce.geometries``?"
+            f"Did you forget to ``import qed_nlce.geometries``?"
         )
     return _REGISTRY[name]()
 
