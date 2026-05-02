@@ -38,6 +38,7 @@ import sys
 from typing import Optional
 
 from .qed_backend import can_run_in_process, run_ed_in_process
+from .cache import EigenvalueCache, SubclusterCache, default_cache_dir
 from .geometry import Geometry
 from .io import (
     ClusterEntry,
@@ -92,6 +93,17 @@ class NLCEWorkflow:
                 os.makedirs(d, exist_ok=True)
 
         self.cluster_info_dir = geometry.cluster_info_path(self.base_dir, order)
+
+        # On-disk caches (eigenvalue + subcluster). Disabled when the
+        # user passes --no_cache; otherwise default to either the
+        # explicit --cache_dir, the QED_NLCE_CACHE env var, or
+        # ~/.cache/qed_nlce/.
+        cache_enabled = not bool(getattr(args, "no_cache", False))
+        cache_dir = getattr(args, "cache_dir", None) or default_cache_dir()
+        self.eig_cache = EigenvalueCache(cache_dir, enabled=cache_enabled)
+        self.subcluster_cache = SubclusterCache(cache_dir, enabled=cache_enabled)
+        if cache_enabled:
+            logging.getLogger().debug("Using NLCE cache dir: %s", cache_dir)
 
     # ------------------------------------------------------------------ run
 
@@ -179,6 +191,22 @@ class NLCEWorkflow:
         if not ok:
             logging.error("Cluster generation failed for geometry=%s", self.geometry.name)
             sys.exit(1)
+        # Subcluster-table cache: if we just regenerated and the
+        # generator wrote subclusters_info.txt, persist it. If the
+        # generator skipped that step (or its output is empty), try
+        # the cache.
+        try:
+            sub_info = os.path.join(self.cluster_info_dir, "subclusters_info.txt")
+            if os.path.isfile(sub_info) and os.path.getsize(sub_info) > 0:
+                self.subcluster_cache.store(
+                    self.geometry.name, self.args.max_order, self.cluster_info_dir,
+                )
+            else:
+                self.subcluster_cache.lookup(
+                    self.geometry.name, self.args.max_order, self.cluster_info_dir,
+                )
+        except Exception as exc:
+            logging.debug("subcluster cache hook failed: %s", exc)
 
     # ------------------------------------------------------------ step 2
 
@@ -270,6 +298,11 @@ class NLCEWorkflow:
             n_total += 1
             ok = run_ed_in_process(
                 ham_subdir, ed_subdir, num_sites, options, log_tag=log_tag,
+                cache=self.eig_cache,
+                cache_key_extras={
+                    "geometry": self.geometry.name,
+                    "cluster_file": cluster.path,
+                },
             )
             if ok:
                 n_ok += 1
@@ -278,6 +311,8 @@ class NLCEWorkflow:
             logging.warning("No ED jobs to run.")
             return
         logging.info("ED: %d / %d clusters succeeded", n_ok, n_total)
+        self.eig_cache.log_summary("eig-cache")
+        self.subcluster_cache.log_summary("subcluster-cache")
 
     # ------------------------------------------------------------ step 4
 

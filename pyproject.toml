@@ -41,6 +41,7 @@ dev = ["pytest>=7", "pytest-xdist>=3"]
 
 [project.scripts]
 qed-nlce = "qed_nlce.cli:main"
+qed-nlce-convergence-report = "qed_nlce.analysis.convergence_report:main"
 
 [project.urls]
 Homepage = "https://github.com/ze-bang/QED_NLCE"

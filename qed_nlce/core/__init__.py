@@ -32,6 +32,12 @@ from .qed_backend import (
     qed_available,
     run_ed_in_process,
 )
+from .cache import (
+    EigenvalueCache,
+    SubclusterCache,
+    canonical_cluster_hash,
+    default_cache_dir,
+)
 from .io import (
     HAS_H5PY,
     ClusterEntry,
@@ -54,6 +60,11 @@ __all__ = [
     "can_run_in_process",
     "qed_available",
     "run_ed_in_process",
+    # cache
+    "EigenvalueCache",
+    "SubclusterCache",
+    "canonical_cluster_hash",
+    "default_cache_dir",
     # io
     "HAS_H5PY",
     "ClusterEntry",

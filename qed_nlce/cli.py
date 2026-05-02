@@ -89,6 +89,15 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     g.add_argument("--num_cores", type=int, default=multiprocessing.cpu_count(),
                    help="Cores for --parallel (default: all)")
 
+    # On-disk eigenvalue + subcluster cache. Content-addressed by
+    # canonical cluster graph hash + Hamiltonian content hash, so
+    # parameter sweeps that hit the same (cluster, Hamiltonian, method)
+    # combination skip the ED step entirely.
+    g.add_argument("--cache_dir", type=str, default=None,
+                   help="Cache root (default: $QED_NLCE_CACHE or ~/.cache/qed_nlce)")
+    g.add_argument("--no_cache", action="store_true",
+                   help="Disable the on-disk eigenvalue / subcluster cache")
+
     # Back-compat: legacy subprocess-related flags. Silently accepted
     # but no longer used -- the ED step always runs in-process via
     # `import qed`.

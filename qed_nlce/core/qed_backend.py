@@ -125,12 +125,35 @@ def run_ed_in_process(
     options: EDOptions,
     *,
     log_tag: str = "ED-inproc",
+    cache: Optional["object"] = None,
+    cache_key_extras: Optional[dict] = None,
 ) -> bool:
     """Run a single cluster's ED in-process via ``qed.exact_diagonalization_from_directory``.
 
     Returns True on success, False otherwise. Mirrors the contract of
     :func:`qed_nlce.core.run_ed_subprocess`.
+
+    If ``cache`` is provided (a :class:`qed_nlce.core.cache.EigenvalueCache`)
+    the eigenvalue cache is consulted before running ED, and the result
+    is persisted on success. ``cache_key_extras`` must contain the
+    canonicalisation inputs (``geometry``, ``cluster_file``).
     """
+    # ----- cache lookup -----
+    cache_key = None
+    if cache is not None and cache_key_extras is not None:
+        try:
+            cache_key = cache.compute_key(
+                geometry=cache_key_extras["geometry"],
+                ham_subdir=ham_subdir,
+                cluster_file=cache_key_extras.get("cluster_file"),
+                options=options,
+                num_sites=num_sites,
+            )
+            if cache.lookup(cache_key, output_dir):
+                return True
+        except Exception as exc:  # cache must never break correctness
+            logging.warning("[%s] eigenvalue cache lookup failed: %s", log_tag, exc)
+            cache_key = None
     method_enum, use_gpu, use_fixed_sz = _resolve_method(options.method)
 
     # Build-introspection guard (cheap, helpful diagnostics).
@@ -189,10 +212,17 @@ def run_ed_in_process(
             params=params,
             format=qed.HamiltonianFileFormat.STANDARD,
         )
-        return True
     except Exception as exc:
         logging.error("[%s] in-process ED failed: %s", log_tag, exc, exc_info=True)
         return False
+
+    # ----- cache store -----
+    if cache is not None and cache_key is not None:
+        try:
+            cache.store(cache_key, output_dir)
+        except Exception as exc:  # store failures are non-fatal
+            logging.warning("[%s] eigenvalue cache store failed: %s", log_tag, exc)
+    return True
 
 
 __all__ = [

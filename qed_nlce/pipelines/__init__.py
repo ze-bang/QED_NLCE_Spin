@@ -18,3 +18,4 @@ To add a new pipeline:
 from . import full_ed  # noqa: F401
 from . import lanczos_boost  # noqa: F401
 from . import ftlm  # noqa: F401
+from . import auto_hybrid  # noqa: F401
