@@ -59,6 +59,7 @@ _INPROC_METHODS = {
     "LOBPCG", "LOBPCG_GPU",
     "FTLM", "FTLM_GPU",
     "LTLM",
+    "KPM_DOS",
     "mTPQ", "mTPQ_CUDA", "mTPQ_GPU", "cTPQ", "cTPQ_GPU",
     "ARPACK_LM", "ARPACK_SM",
     "CHEBYSHEV_FILTERED",
@@ -200,6 +201,32 @@ def run_ed_in_process(
     if options.krylov_dim is not None:
         params.ftlm_krylov_dim = options.krylov_dim
         params.ltlm_krylov_dim = options.krylov_dim
+
+    # KPM-DOS: tunnel `samples` -> kpm_num_random_vectors, `krylov_dim`
+    # -> kpm_num_moments, plus parse the optional --kpm_* extra_flags
+    # the kpm_dos pipeline emits (--kpm_kernel, --kpm_lorentz_lambda,
+    # --kpm_quadrature_nodes, --kpm_seed). All other KPM params keep
+    # their EDParameters defaults.
+    if options.method.upper() == "KPM_DOS":
+        if options.samples is not None:
+            params.kpm_num_random_vectors = options.samples
+        if options.krylov_dim is not None:
+            params.kpm_num_moments = options.krylov_dim
+        for flag in (options.extra_flags or []):
+            if not flag.startswith("--kpm_") or "=" not in flag:
+                continue
+            key, _, val = flag[2:].partition("=")
+            if key == "kpm_kernel":
+                params.kpm_use_jackson_kernel = (val.lower() == "jackson")
+            elif key == "kpm_lorentz_lambda":
+                try: params.kpm_lorentz_lambda = float(val)
+                except ValueError: pass
+            elif key == "kpm_quadrature_nodes":
+                try: params.kpm_num_quadrature_nodes = int(val)
+                except ValueError: pass
+            elif key == "kpm_seed":
+                try: params.kpm_seed = int(val)
+                except ValueError: pass
 
     out_subdir = os.path.join(output_dir, "output")
     os.makedirs(out_subdir, exist_ok=True)
