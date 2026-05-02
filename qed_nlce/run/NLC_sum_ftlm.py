@@ -210,7 +210,48 @@ class NLCExpansionFTLM:
                         'free_energy': free_energy,
                         'free_energy_error': np.zeros_like(free_energy)
                     }
-                
+
+                # Final fallback: compute thermodynamics directly from
+                # /eigendata/eigenvalues. This handles FULL ED clusters
+                # written by pipelines that didn't materialise the
+                # /thermodynamics/* group (e.g. the auto pipeline's
+                # FULL branch on small clusters). T-grid is taken from
+                # the parent NLCSummation if available, else
+                # logspace(-1, 1, 80).
+                if '/eigendata/eigenvalues' in f:
+                    evs = np.asarray(f['/eigendata/eigenvalues'][:], dtype=float)
+                    if evs.size == 0:
+                        return None
+                    if hasattr(self, 'temp_values') and self.temp_values is not None \
+                            and len(self.temp_values) > 0:
+                        temps = np.asarray(self.temp_values, dtype=float)
+                    else:
+                        temps = np.logspace(-1.0, 1.0, 80)
+                    e0 = float(evs.min())
+                    shifted = evs - e0  # avoid overflow at low T
+                    betas = 1.0 / np.maximum(temps, 1e-30)
+                    # Z = sum exp(-beta * (E_i - e0)),  E = e0 + sum E_i'*p_i
+                    bw = np.exp(-np.outer(betas, shifted))  # (nT, D)
+                    Z = bw.sum(axis=1)
+                    p = bw / Z[:, None]
+                    E = e0 + (p * shifted).sum(axis=1)
+                    E2 = ((p * shifted * shifted).sum(axis=1)
+                          + 2.0 * e0 * (p * shifted).sum(axis=1) + e0 * e0)
+                    Cv = (E2 - E * E) * betas * betas
+                    F = e0 - np.log(np.maximum(Z, 1e-300)) / np.maximum(betas, 1e-30)
+                    S = betas * (E - F)
+                    return {
+                        'temperatures': temps,
+                        'energy': E,
+                        'energy_error': np.zeros_like(E),
+                        'specific_heat': Cv,
+                        'specific_heat_error': np.zeros_like(Cv),
+                        'entropy': S,
+                        'entropy_error': np.zeros_like(S),
+                        'free_energy': F,
+                        'free_energy_error': np.zeros_like(F),
+                    }
+
                 return None
         except Exception as e:
             print(f"Warning: Error reading HDF5 data for cluster {cluster_id}: {e}")

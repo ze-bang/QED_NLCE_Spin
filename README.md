@@ -23,19 +23,109 @@ pip install git+https://github.com/ze-bang/QED_NLCE.git
 
 ## Quick start
 
-```bash
-# Unified CLI -- pick a geometry and a pipeline.
-qed-nlce --help
-qed-nlce --geometry pyrochlore --pipeline ftlm \
-         --max_order 5 --ftlm_samples 30 \
-         --base_dir output/pyro_ftlm_o5
+**Recommended default — let the framework pick the backend per cluster:**
 
-# Each cluster's ED runs in-process via
-# qed.exact_diagonalization_from_directory(...). There is no
-# subprocess fork per cluster.
-qed-nlce --geometry triangular_site --pipeline full_ed \
-         --max_order 6 \
-         --base_dir output/tri_full_o6
+```bash
+qed-nlce --geometry triangular_site --pipeline auto \
+         --max_order 8 \
+         --J1 1.0 --temp_min 0.1 --temp_max 10 --temp_bins 100 --thermo \
+         --base_dir output/tri_auto_o8
+```
+
+The `auto` pipeline runs FULL dense ED below `--auto_full_hilbert`
+(default `2**14 = 16384`) and switches to KPM-DOS thermodynamics
+above. KPM-DOS Hutchinson variance scales as `1/sqrt(R*D)` so
+per-cluster error *improves* as the cluster grows — at `N=20`,
+`R=20`, `M=2048` it is `~4e-4`, comfortably below the per-cluster
+target dictated by NLCE Möbius condition number `κ ~ 30-80`.
+
+**Other pipelines:**
+
+```bash
+# Force FULL ED everywhere
+qed-nlce --geometry pyrochlore --pipeline full_ed --max_order 5 \
+         --base_dir output/pyro_full_o5
+
+# Force KPM-DOS everywhere (low-variance trace, large clusters)
+qed-nlce --geometry triangular_site --pipeline kpm_dos --max_order 8 \
+         --kpm_moments 2048 --kpm_random_vectors 20 --thermo \
+         --base_dir output/tri_kpm_o8
+
+# Legacy FTLM (kept for back-compat; high noise floor at NLCE order ≥ 6)
+qed-nlce --geometry pyrochlore --pipeline ftlm --max_order 5 \
+         --ftlm_samples 30 --base_dir output/pyro_ftlm_o5
+
+# Lanczos lowest-eigenvalues (for ground-state observables only)
+qed-nlce --geometry pyrochlore --pipeline lanczos_boost --max_order 5 \
+         --base_dir output/pyro_lz_o5
+```
+
+**Legacy fitter integration** (`qed_nlce/analysis/nlc_fit_triangular.py`)
+accepts `ed_method="AUTO"`, `"KPM_DOS"`, `"FTLM"`, or `"FULL"` in
+`fixed_params`; the `nlce_triangular.py` shim auto-promotes those to
+the matching pipeline.
+
+## Pipelines
+
+| Pipeline | Per-cluster ED | Best for | Notes |
+| --- | --- | --- | --- |
+| `auto` | FULL ↔ KPM-DOS (crossover at `--auto_full_hilbert`) | **Production runs at orders ≥ 6** | Smart default; orthogonal `--auto_fixed_sz` and `--auto_streaming_symmetry` axes. |
+| `full_ed` | LAPACK dense ED, all eigenvalues | Small clusters / orders ≤ 5 | Noise-free anchor; cost `O(D^3)`. |
+| `kpm_dos` | KPM Chebyshev moments + Hutchinson trace + Cheb-Gauss quadrature | Large clusters (`N ≥ 14`) | C++ kernel `ed::kpm_dos`. Variance `1/√(R·D)`. |
+| `ftlm` | Finite-Temperature Lanczos | Legacy; large `D` with low memory | `~5%` per-cluster noise floor; Möbius amplifies to `15–40%` on summed `C(T)` at orders ≥ 6. |
+| `lanczos_boost` | Lanczos lowest-`k` eigenvalues | Ground-state observables | No thermo. |
+
+### `auto` pipeline knobs
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--auto_backend {kpm_dos,ftlm}` | `kpm_dos` | Iterative backend used above the FULL-ED ceiling. |
+| `--auto_full_hilbert N` | `16384` (`2**14`) | FULL-ED ceiling on full Hilbert-space dim. |
+| `--auto_kpm_moments M` | `2048` | KPM Chebyshev moments. |
+| `--auto_kpm_random_vectors R` | `20` | KPM Hutchinson random-vector count. |
+| `--auto_kpm_kernel {jackson,lorentz}` | `jackson` | KPM smoothing kernel. |
+| `--auto_kpm_seed S` | `0` | Seed for Hutchinson vectors (0 = nondeterministic). |
+| `--auto_min_samples`, `--auto_max_samples` | `40, 200` | Adaptive sample range, only used when `--auto_backend=ftlm`. |
+| `--auto_fixed_sz` | off | Append `_FIXED_SZ` to every cluster's method (currently a single-Sz-block trace; **only physically correct if you know your model conserves Sz_total *and* you want the partial trace** — full-physical thermo with sector summing is not yet wired). |
+| `--auto_streaming_symmetry` | off | Cluster-automorphism orbit-basis decomposition (cached per cluster). |
+
+### Symmetry & U(1) Sz blocking
+
+Two orthogonal axes for shrinking the per-cluster Hilbert space:
+
+* **`--auto_streaming_symmetry`** — exploit the geometric automorphism
+  group of each cluster (lattice symmetries). Adds a one-time orbit-
+  basis construction per cluster (cached under the cluster's ham
+  dir as `basis_cache/`). **Always physically correct** — symmetry
+  sectors are added back together by the framework.
+
+* **`--auto_fixed_sz`** — assert the Hamiltonian conserves
+  `S^z_total`. Routes every cluster through the dispatcher with
+  `params.use_fixed_sz = True`, which currently selects the *single*
+  `Sz = 0` block in the C++ backend. **This is a partial trace** —
+  use only when:
+
+  1. Your model has no transverse field (`h_x`, `h_y`) and no Sx/Sy
+     single-site or anisotropic xy terms — i.e. it actually commutes
+     with `S^z_total`. (Pure Heisenberg / XXZ / Ising fit; transverse
+     field, DM interactions, Kitaev terms break this.)
+  2. You explicitly want the `Sz = 0` partial trace (e.g. you are
+     studying a magnetization plateau or restricting to a specific
+     sector). For full unconstrained thermo, leave this off.
+
+  Auto-detection of U(1)-Sz from `InterAll.dat` is on the roadmap;
+  for now it is an explicit user assertion.
+
+```bash
+# Heisenberg model with full geometric symmetry, all Sz sectors:
+qed-nlce --geometry triangular_site --pipeline auto --max_order 8 \
+         --J1 1.0 --thermo --auto_streaming_symmetry \
+         --base_dir output/tri_auto_sym_o8
+
+# Same model, restricted to Sz = 0 sector (single-block trace):
+qed-nlce --geometry triangular_site --pipeline auto --max_order 8 \
+         --J1 1.0 --thermo --auto_streaming_symmetry --auto_fixed_sz \
+         --base_dir output/tri_auto_sym_sz0_o8
 ```
 
 ## Backend
@@ -62,7 +152,7 @@ back-compat but ignored.
 | --- | --- |
 | `qed_nlce.core` | `Geometry` / `Pipeline` abstractions, `NLCEWorkflow` orchestrator, in-process ED bridge (`EDOptions`, `run_ed_in_process`, `can_run_in_process`). |
 | `qed_nlce.geometries` | Concrete lattices: `pyrochlore`, `triangular_site`, `triangular_triangle`. |
-| `qed_nlce.pipelines` | ED strategies: `full_ed`, `lanczos_boost`, `ftlm`. |
+| `qed_nlce.pipelines` | ED strategies: `auto`, `full_ed`, `kpm_dos`, `lanczos_boost`, `ftlm`. |
 | `qed_nlce.prep` | Cluster generators (graph enumeration). |
 | `qed_nlce.run` | NLCE summation kernels + legacy per-lattice driver scripts. |
 | `qed_nlce.analysis` | Convergence diagnostics, fitting drivers, plot helpers. |

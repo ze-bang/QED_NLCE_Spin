@@ -50,16 +50,17 @@ def qed_available() -> bool:
 
 # Method names that have a clean in-process Python equivalent.
 _INPROC_METHODS = {
-    "FULL", "FULL_GPU",
+    "FULL", "FULL_GPU", "FULL_FIXED_SZ", "FULL_GPU_FIXED_SZ",
     "LANCZOS", "LANCZOS_GPU", "LANCZOS_NO_ORTHO", "LANCZOS_SELECTIVE",
+    "LANCZOS_FIXED_SZ", "LANCZOS_GPU_FIXED_SZ",
     "BLOCK_LANCZOS", "BLOCK_LANCZOS_GPU",
     "KRYLOV_SCHUR", "KRYLOV_SCHUR_GPU",
     "BLOCK_KRYLOV_SCHUR", "BLOCK_KRYLOV_SCHUR_GPU",
     "DAVIDSON", "DAVIDSON_GPU",
     "LOBPCG", "LOBPCG_GPU",
-    "FTLM", "FTLM_GPU",
-    "LTLM",
-    "KPM_DOS",
+    "FTLM", "FTLM_GPU", "FTLM_FIXED_SZ", "FTLM_GPU_FIXED_SZ",
+    "LTLM", "LTLM_FIXED_SZ",
+    "KPM_DOS", "KPM_DOS_FIXED_SZ",
     "mTPQ", "mTPQ_CUDA", "mTPQ_GPU", "cTPQ", "cTPQ_GPU",
     "ARPACK_LM", "ARPACK_SM",
     "CHEBYSHEV_FILTERED",

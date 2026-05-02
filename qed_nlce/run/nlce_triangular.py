@@ -34,12 +34,54 @@ from qed_nlce.cli import main as unified_main  # noqa: E402
 
 
 def _translate_argv(argv: list[str]) -> list[str]:
-    """Map legacy nlce_triangular.py argv onto the unified CLI argv."""
+    """Map legacy nlce_triangular.py argv onto the unified CLI argv.
+
+    Legacy callers (e.g. ``analysis/nlc_fit_triangular.py``) pass
+    ``--method=FULL`` / ``--method=FTLM`` / ``--method=AUTO`` /
+    ``--method=KPM_DOS``. We auto-promote the chosen pipeline:
+
+    * ``--method=AUTO``     -> ``--pipeline=auto``  (smart default)
+    * ``--method=KPM_DOS*`` -> ``--pipeline=kpm_dos``
+    * ``--method=FTLM*``    -> ``--pipeline=ftlm``
+    * everything else       -> ``--pipeline=full_ed`` (forwards --method)
+    """
     geometry = "triangular_site" if "--site_based" in argv else "triangular_triangle"
-    out = [f"--geometry={geometry}", "--pipeline=full_ed"]
+
+    method_token = ""
     for tok in argv:
+        if tok.startswith("--method="):
+            method_token = tok.split("=", 1)[1].upper()
+            break
+        if tok == "--method":
+            i = argv.index(tok)
+            if i + 1 < len(argv):
+                method_token = argv[i + 1].upper()
+            break
+
+    if method_token == "AUTO":
+        pipeline = "auto"
+    elif method_token.startswith("KPM_DOS") or method_token == "KPM":
+        pipeline = "kpm_dos"
+    elif method_token.startswith("FTLM") or method_token.startswith("LTLM"):
+        pipeline = "ftlm"
+    else:
+        pipeline = "full_ed"
+
+    out = [f"--geometry={geometry}", f"--pipeline={pipeline}"]
+    skip_next = False
+    for tok in argv:
+        if skip_next:
+            skip_next = False
+            continue
         if tok == "--site_based":
-            continue  # consumed above
+            continue
+        # Strip --method for AUTO / KPM_DOS / FTLM pipelines (they own
+        # the method choice). full_ed accepts --method directly so we
+        # forward it.
+        if pipeline != "full_ed" and (tok.startswith("--method=") or tok == "--method"):
+            if tok == "--method":
+                skip_next = True
+            continue
         out.append(tok)
     return out
 
