@@ -334,3 +334,116 @@ each kernel's native vocabulary:
   native = {none, euler, wynn, wynn_multi, brezinski, aitken, pade, entropy_derived}.
 * `NLC_sum.py` (used by `full_ed` on pyrochlore):
   native = {auto, direct, euler, wynn, shanks, aitken, pade}.
+
+
+## 10. Parallelism — running many clusters at once
+
+NLCE is *embarrassingly parallel* across clusters: each ED is
+independent, and the cluster sum is performed only at the very end.
+`qed-nlce` exposes within-node multiprocessing parallelism for the
+heavy steps; for cross-node scaling, wrap the CLI in a SLURM array.
+
+### Knobs
+
+| Flag | Effect |
+| ---- | ------ |
+| `--parallel`            | Enable parallelism in cluster-prep / basis-precompute / ED steps. |
+| `--num_cores N`         | Total core budget (default: all logical cores). |
+| `--ed_parallel_workers W` | Override # workers for the ED step (default: `--num_cores`). Threads-per-worker auto-pinned to `max(1, num_cores // W)`. |
+
+### What runs in parallel
+
+| Step | Parallelised? | Backend |
+| ---- | ------------- | ------- |
+| 1. cluster generation | depends on geometry (some are serial) | `multiprocessing.Pool` (fork) |
+| 2. Hamiltonian prep   | sequential (cheap) | — |
+| 2.5. basis precompute | yes (when `--streaming-symmetry`) | `multiprocessing.Pool` (fork) |
+| 3. ED                 | yes (NEW) | `multiprocessing.Pool` (`spawn`) |
+| 4. NLCE summation     | sequential (cheap) | — |
+
+ED uses the **`spawn` start method**, not `fork`. Forking after the
+parent has loaded `qed`, MKL, OpenMP, or CUDA is unsafe — MKL spawns
+worker threads that don't survive `fork(2)`, and CUDA driver state is
+per-process. Spawning means each worker boots a fresh interpreter and
+imports `qed` lazily on first call, by which point the pool initializer
+has already pinned the BLAS/OMP thread counts. The cost is one
+~0.3 s startup per worker, paid once.
+
+### Why threads-per-worker matters
+
+Naively running `W` workers each with `T = num_cores` BLAS threads
+gives you `W·T` total threads chasing `num_cores` cores — pure
+thrashing. The pool initializer therefore sets
+
+```
+OMP_NUM_THREADS = MKL_NUM_THREADS = OPENBLAS_NUM_THREADS
+                = max(1, num_cores // W)
+```
+
+inside every worker before `qed` is imported. To override, set
+`OMP_NUM_THREADS` in your shell before launching `qed-nlce` (the
+initializer only runs after env capture).
+
+### Rule of thumb
+
+| Scenario | Recommended setting |
+| -------- | ------------------- |
+| Many small clusters (order ≤ 8, FULL branch) | `--num_cores N` (default), `--ed_parallel_workers N` (1 thread/worker, max throughput) |
+| Few large clusters dominating wall time | `--ed_parallel_workers small`, e.g. `2` on 16 cores → 8 BLAS threads each, MKL stays effective |
+| Mixed workload | `--ed_parallel_workers ≈ √N` is a reasonable starting point |
+
+### Cache safety under parallel workers
+
+The on-disk eigenvalue cache is **content-addressed** (SHA-256 over
+the Hamiltonian + ED options). Two parallel workers computing the
+same digest produce byte-identical content, but a naive `shutil.copy2`
+into `<cache>/<digest>.h5` would still tear under concurrent writes.
+
+`EigenvalueCache` therefore uses a write-then-`os.replace` discipline:
+each worker stages its result into a sibling
+`<dst>.tmp.<pid>.<rand>` (file) or `<dst>.tmp.<pid>.<rand>` (dir),
+then atomically renames into place. `os.replace` is atomic on POSIX
+(`rename(2)`). The meta JSON is written **last**, so the lookup gate
+(which keys cache-readiness on the meta file's existence) never
+observes a half-finished entry. The `SubclusterCache` uses the same
+pattern.
+
+In short: it is safe to point `--cache_dir` at a shared cache from
+many concurrent `qed-nlce` jobs — even on the same digest — without
+any external locking. Worst case is the loser of a race overwrites
+the winner with the same bytes.
+
+### GPU caveat
+
+The KPM-DOS kernel currently runs on CPU only; the FULL branch can
+optionally use cuSOLVER (`*_GPU`). Combining `--parallel` with a
+GPU-backed method is **not supported** out of the box: every worker
+would target GPU 0 and contend on a single device. If you need
+multi-GPU scaling, set `CUDA_VISIBLE_DEVICES` per worker manually
+(e.g. via a SLURM array, one job per GPU).
+
+### How does this compare to SOTA NLCE codes?
+
+Three patterns are common in the literature:
+
+1. **SLURM job arrays — one ED per job.**  Used by Singh / Oitmaa &
+   collaborators. Trivially scales to thousands of nodes; coordination
+   is the filesystem itself; no per-job parallelism needed beyond
+   what one ED solver provides. `qed-nlce` supports this naturally:
+   loop over cluster files in a shell wrapper, point each invocation
+   at a different `--base_dir`.
+2. **MPI master/worker farm.**  Used in Tang / Khatami / Rigol style
+   pyrochlore NLCE codes — a single launcher hands clusters out via
+   `MPI_Send` so that load balancing is dynamic across heterogeneous
+   cluster sizes. Great for tightly-coupled HPC, but requires every
+   node to have the same software stack.
+3. **Within-node multiprocessing.Pool.**  Used by `qed-nlce`'s
+   `--parallel` mode. Lower coordination cost (no MPI), zero
+   filesystem chatter, and the cache shares state between workers via
+   the same content-addressed directory. Best for single-node runs
+   and the inner loop of a SLURM-array job (combine with #1 for
+   multi-node throughput).
+
+`qed-nlce` is therefore aligned with current best practice: pattern
+#3 within a node, with pattern #1 as the recommended way to scale
+beyond one node.

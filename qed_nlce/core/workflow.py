@@ -35,10 +35,12 @@ import multiprocessing
 import os
 import subprocess
 import sys
+from dataclasses import dataclass
 from typing import Optional
 
 from .qed_backend import can_run_in_process, run_ed_in_process
 from .cache import EigenvalueCache, SubclusterCache, default_cache_dir
+from .ed_runner import EDOptions
 from .geometry import Geometry
 from .io import (
     ClusterEntry,
@@ -56,6 +58,70 @@ def _basis_worker(payload: tuple) -> bool:
     """Pure function form of one basis precompute call."""
     geometry, args, cluster_id, order, ham_subdir = payload
     return geometry.precompute_basis(args, cluster_id, order, ham_subdir)
+
+
+# ---------------------------------------------------------------------------
+# Parallel-ED worker (spawn-safe; reconstructs the cache from cache_dir).
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _EDPayload:
+    """Picklable per-cluster ED job description for the spawn-Pool."""
+    ham_subdir: str
+    ed_subdir: str
+    num_sites: int
+    options: EDOptions
+    log_tag: str
+    cache_dir: Optional[str]
+    cache_enabled: bool
+    cache_key_extras: dict
+
+
+def _ed_pool_initializer(omp_threads: int) -> None:
+    """Pin BLAS/OMP threading inside each worker.
+
+    Set BEFORE the worker imports ``qed`` / numpy / scipy so MKL,
+    OpenBLAS, and OpenMP all initialise with the correct per-worker
+    thread budget. Avoids the ``num_workers * total_cores`` thread
+    explosion that otherwise destroys parallel scaling.
+    """
+    val = str(max(1, int(omp_threads)))
+    for k in (
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "BLIS_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+    ):
+        os.environ[k] = val
+
+
+def _ed_worker(payload: _EDPayload) -> tuple[str, bool, Optional[str]]:
+    """Run ED for one cluster in a fresh worker process.
+
+    Each worker imports ``qed`` lazily on first call, by which point
+    the pool initializer has already pinned the BLAS/OMP thread
+    counts. Cache instance is reconstructed locally because pickling
+    the parent's :class:`EigenvalueCache` is unnecessary (it is just
+    constructor args + a stats counter we don't aggregate cross-
+    process).
+    """
+    try:
+        cache = EigenvalueCache(
+            payload.cache_dir or default_cache_dir(),
+            enabled=payload.cache_enabled,
+        )
+        ok = run_ed_in_process(
+            payload.ham_subdir, payload.ed_subdir,
+            payload.num_sites, payload.options,
+            log_tag=payload.log_tag,
+            cache=cache, cache_key_extras=payload.cache_key_extras,
+        )
+        return (payload.log_tag, bool(ok), None)
+    except Exception as exc:  # noqa: BLE001
+        return (payload.log_tag, False, f"{type(exc).__name__}: {exc}")
 
 
 class NLCEWorkflow:
@@ -262,15 +328,13 @@ class NLCEWorkflow:
         )
         logging.info("=" * 80)
 
-        n_total = 0
-        n_ok = 0
-        try:
-            from tqdm import tqdm
-            iterable = tqdm(clusters, desc="ED in-process")
-        except ImportError:
-            iterable = clusters
-
-        for cluster in iterable:
+        # Build the per-cluster job list once. Each entry already has
+        # the per-cluster Pipeline-resolved EDOptions, the cache key
+        # extras, and the in-process / MPI gating result -- so the
+        # serial path and the parallel path execute the same set of
+        # operations.
+        jobs: list[tuple[ClusterEntry, _EDPayload]] = []
+        for cluster in clusters:
             ham_subdir = self._ham_subdir_for(cluster)
             ed_subdir = self._ed_subdir_for(cluster)
             os.makedirs(os.path.join(ed_subdir, "output"), exist_ok=True)
@@ -281,9 +345,7 @@ class NLCEWorkflow:
             if num_sites is None:
                 logging.warning("Could not determine site count for %s", ham_subdir)
                 continue
-
             options = self.pipeline.make_ed_options(self.args, num_sites)
-
             if not can_run_in_process(options.method):
                 logging.error(
                     "Method '%s' is not supported by the in-process qed "
@@ -293,26 +355,115 @@ class NLCEWorkflow:
                     options.method, cluster.cluster_id, num_sites,
                 )
                 continue
-
-            log_tag = f"{self.pipeline.name}:cluster_{cluster.cluster_id}"
-            n_total += 1
-            ok = run_ed_in_process(
-                ham_subdir, ed_subdir, num_sites, options, log_tag=log_tag,
-                cache=self.eig_cache,
+            payload = _EDPayload(
+                ham_subdir=ham_subdir,
+                ed_subdir=ed_subdir,
+                num_sites=num_sites,
+                options=options,
+                log_tag=f"{self.pipeline.name}:cluster_{cluster.cluster_id}",
+                cache_dir=getattr(self.args, "cache_dir", None) or default_cache_dir(),
+                cache_enabled=self.eig_cache.enabled,
                 cache_key_extras={
                     "geometry": self.geometry.name,
                     "cluster_file": cluster.path,
                 },
             )
-            if ok:
-                n_ok += 1
+            jobs.append((cluster, payload))
 
-        if n_total == 0:
+        if not jobs:
             logging.warning("No ED jobs to run.")
             return
+
+        n_total = len(jobs)
+        n_ok = 0
+
+        # Decide serial vs parallel. The default is serial (back-compat
+        # + single shared qed module + CUDA / OpenMP context). Going
+        # parallel means a process pool with --num_cores workers, each
+        # with reduced BLAS/OMP threads to avoid oversubscription.
+        parallel_enabled = bool(getattr(self.args, "parallel", False))
+        ed_workers = int(getattr(self.args, "ed_parallel_workers", 0) or 0)
+        if parallel_enabled and ed_workers <= 0:
+            ed_workers = int(getattr(self.args, "num_cores", 1) or 1)
+        ed_workers = max(1, min(ed_workers, n_total))
+
+        if not parallel_enabled or ed_workers == 1:
+            n_ok = self._run_ed_serial(jobs)
+        else:
+            n_ok = self._run_ed_parallel(jobs, ed_workers)
+
         logging.info("ED: %d / %d clusters succeeded", n_ok, n_total)
         self.eig_cache.log_summary("eig-cache")
         self.subcluster_cache.log_summary("subcluster-cache")
+
+    # ---- serial / parallel ED dispatch helpers ----
+
+    def _run_ed_serial(self, jobs: list[tuple[ClusterEntry, _EDPayload]]) -> int:
+        try:
+            from tqdm import tqdm
+            iterable = tqdm(jobs, desc="ED in-process")
+        except ImportError:
+            iterable = jobs
+        n_ok = 0
+        for _cluster, payload in iterable:
+            ok = run_ed_in_process(
+                payload.ham_subdir, payload.ed_subdir, payload.num_sites,
+                payload.options, log_tag=payload.log_tag,
+                cache=self.eig_cache,
+                cache_key_extras=payload.cache_key_extras,
+            )
+            if ok:
+                n_ok += 1
+        return n_ok
+
+    def _run_ed_parallel(
+        self,
+        jobs: list[tuple[ClusterEntry, _EDPayload]],
+        ed_workers: int,
+    ) -> int:
+        # Pick BLAS/OMP threads-per-worker so total threads ~= num_cores.
+        total_cores = int(getattr(self.args, "num_cores", 1) or 1)
+        omp_threads = max(1, total_cores // ed_workers)
+        logging.info(
+            "Parallel ED: %d workers x %d BLAS/OMP threads each "
+            "(%d clusters total)",
+            ed_workers, omp_threads, len(jobs),
+        )
+
+        # Spawn (NOT fork) so each worker boots a fresh interpreter with
+        # OMP/MKL/CUDA in a clean state. Forking after qed/CUDA/MKL has
+        # been initialised in the parent is unsafe (CUDA driver state
+        # is per-process; MKL spawns its own threads pre-fork).
+        ctx = multiprocessing.get_context("spawn")
+
+        try:
+            from tqdm import tqdm
+            pbar = tqdm(total=len(jobs), desc="ED parallel")
+        except ImportError:
+            pbar = None
+
+        n_ok = 0
+        payloads = [p for (_c, p) in jobs]
+        with ctx.Pool(
+            processes=ed_workers,
+            initializer=_ed_pool_initializer,
+            initargs=(omp_threads,),
+        ) as pool:
+            # imap_unordered for live progress + early failure visibility.
+            for tag, ok, err in pool.imap_unordered(
+                _ed_worker, payloads, chunksize=1,
+            ):
+                if ok:
+                    n_ok += 1
+                else:
+                    logging.error(
+                        "ED worker %s failed%s", tag, f": {err}" if err else "",
+                    )
+                if pbar is not None:
+                    pbar.update(1)
+        if pbar is not None:
+            pbar.close()
+        return n_ok
 
     # ------------------------------------------------------------ step 4
 

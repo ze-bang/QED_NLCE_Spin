@@ -81,13 +81,22 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     g.add_argument("--skip_nlc", action="store_true",
                    help="Skip NLCE summation step")
 
-    # Parallelism (applies to cluster-prep and basis-precompute steps;
-    # the ED step itself runs sequentially in-process to share the qed
-    # module + CUDA / OpenMP runtime context across clusters).
+    # Parallelism. Applies to:
+    #   * cluster-prep (some geometries),
+    #   * basis-precompute (Step 2.5, --streaming-symmetry),
+    #   * ED (Step 3) -- multiprocessing.Pool with `spawn` context so
+    #     each worker boots with a clean OMP/MKL/CUDA state. BLAS/OMP
+    #     thread count per worker is auto-pinned to
+    #     max(1, num_cores // ed_parallel_workers) to avoid
+    #     thread-explosion oversubscription.
     g.add_argument("--parallel", action="store_true",
-                   help="Run cluster-prep / basis-precompute jobs in parallel")
+                   help="Run cluster-prep / basis-precompute / ED in parallel")
     g.add_argument("--num_cores", type=int, default=multiprocessing.cpu_count(),
-                   help="Cores for --parallel (default: all)")
+                   help="Total core budget for --parallel (default: all)")
+    g.add_argument("--ed_parallel_workers", type=int, default=0,
+                   help="Override # workers for the parallel ED step "
+                        "(default: --num_cores). Threads-per-worker is "
+                        "automatically set to num_cores // ed_parallel_workers.")
 
     # On-disk eigenvalue + subcluster cache. Content-addressed by
     # canonical cluster graph hash + Hamiltonian content hash, so

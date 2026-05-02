@@ -49,6 +49,8 @@ import logging
 import os
 import re
 import shutil
+import tempfile
+import uuid
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
@@ -64,6 +66,70 @@ __all__ = [
 
 
 _HASH_LEN = 32  # truncated SHA-256 hex chars (= 128 bits)
+
+
+# ---------------------------------------------------------------------------
+# Atomic-write helpers (race-safe for parallel workers writing the same digest)
+# ---------------------------------------------------------------------------
+
+
+def _atomic_copy_file(src: str, dst: str) -> None:
+    """Copy ``src`` to ``dst`` atomically.
+
+    Writes to a sibling ``<dst>.tmp.<pid>.<rand>`` then ``os.replace``s
+    onto ``dst``. ``os.replace`` is atomic on POSIX *and* Windows when
+    source and target are on the same filesystem, so two parallel
+    workers writing the same digest will never observe a torn file.
+    The loser of the race simply overwrites the winner with byte-
+    identical content (caches are content-addressed by digest).
+    """
+    dst_dir = os.path.dirname(dst) or "."
+    os.makedirs(dst_dir, exist_ok=True)
+    tmp = os.path.join(
+        dst_dir, f".{os.path.basename(dst)}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}",
+    )
+    try:
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dst)
+    finally:
+        if os.path.exists(tmp):
+            try: os.remove(tmp)
+            except OSError: pass
+
+
+def _atomic_copy_tree(src: str, dst: str) -> None:
+    """Copy directory ``src`` to ``dst`` atomically.
+
+    Materialises into a sibling tempdir, then ``os.replace``s the
+    directory onto ``dst``. ``os.replace`` on a directory is atomic on
+    POSIX (rename(2)) provided source and target are on the same
+    filesystem and the target either does not exist or is an empty
+    directory; we shutil.rmtree the existing target only on the loser
+    of a race (same content, so safe).
+    """
+    dst_parent = os.path.dirname(dst) or "."
+    os.makedirs(dst_parent, exist_ok=True)
+    tmp = os.path.join(
+        dst_parent, f".{os.path.basename(dst)}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}",
+    )
+    try:
+        shutil.copytree(src, tmp)
+        if os.path.isdir(dst):
+            # Loser of the race -- atomically swap in our copy and
+            # remove the existing one. Same digest means same content.
+            old_swap = dst + f".old.{os.getpid()}.{uuid.uuid4().hex[:8]}"
+            try:
+                os.rename(dst, old_swap)
+                os.replace(tmp, dst)
+            finally:
+                if os.path.isdir(old_swap):
+                    shutil.rmtree(old_swap, ignore_errors=True)
+        else:
+            os.replace(tmp, dst)
+    finally:
+        if os.path.isdir(tmp):
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 
 def default_cache_dir() -> str:
@@ -348,7 +414,14 @@ class EigenvalueCache:
             return False
 
     def store(self, key: EigenvalueCacheKey, output_dir: str) -> None:
-        """Persist the per-cluster output directory to the cache."""
+        """Persist the per-cluster output directory to the cache.
+
+        Race-safe under parallel workers: writes go through a
+        per-process tempfile/tempdir then ``os.replace`` onto the final
+        digest path. Two workers computing the same digest will
+        produce byte-identical content; whichever finishes last simply
+        overwrites with the same bytes.
+        """
         if not self.enabled:
             return
         digest = key.digest()
@@ -359,15 +432,21 @@ class EigenvalueCache:
             return
         h5, thermo_dir, meta = self._entry_paths(digest)
         try:
-            os.makedirs(os.path.dirname(h5), exist_ok=True)
-            shutil.copy2(src_h5, h5)
+            _atomic_copy_file(src_h5, h5)
             src_thermo = os.path.join(out_subdir, "thermo")
             if os.path.isdir(src_thermo):
-                if os.path.isdir(thermo_dir):
-                    shutil.rmtree(thermo_dir)
-                shutil.copytree(src_thermo, thermo_dir)
-            with open(meta, "w", encoding="utf-8") as f:
+                _atomic_copy_tree(src_thermo, thermo_dir)
+            # Meta file last so a half-finished entry isn't observable
+            # to the lookup() path (which keys readiness on the .meta).
+            meta_dir = os.path.dirname(meta)
+            os.makedirs(meta_dir, exist_ok=True)
+            tmp_meta = os.path.join(
+                meta_dir,
+                f".{os.path.basename(meta)}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}",
+            )
+            with open(tmp_meta, "w", encoding="utf-8") as f:
                 json.dump(asdict(key), f, indent=2, sort_keys=True)
+            os.replace(tmp_meta, meta)
             self.stats.stores += 1
             logging.info(
                 "[cache] STORE %s  <- %s", digest[:12], output_dir,
@@ -477,8 +556,7 @@ class SubclusterCache:
             return
         dst = self._entry_path(geometry, digest)
         try:
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.copy2(src, dst)
+            _atomic_copy_file(src, dst)
             self.stats.stores += 1
             logging.info(
                 "[subcluster-cache] STORE %s  <- %s", digest[:12], src,
