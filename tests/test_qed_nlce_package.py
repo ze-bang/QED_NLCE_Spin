@@ -212,42 +212,34 @@ def test_full_ed_pipeline_make_ed_options_default_ok():
 
 
 # ---------------------------------------------------------------------------
-# build_ed_command auto-promotion behaviour
+# In-process qed backend smoke tests
 # ---------------------------------------------------------------------------
 
 
-def test_build_ed_command_auto_promotes_FULL_to_SCALAPACK_for_large_clusters():
+def test_qed_backend_method_dispatch():
+    """The in-process backend accepts the documented non-MPI methods
+    and rejects the MPI-only ones (which used to be auto-promoted by
+    the now-removed subprocess path)."""
     import qed_nlce  # noqa: F401
-    from qed_nlce.core import EDOptions, build_ed_command
+    from qed_nlce.core import can_run_in_process
 
-    options = EDOptions(method="FULL")
-    cmd = build_ed_command(
-        ed_executable="/path/ED", ham_subdir="/ham", output_dir="/out",
-        num_sites=16, options=options, scalapack_threshold=16,
-        use_scalapack=True,
-    )
-    assert "--method=SCALAPACK_MIXED" in cmd
-
-    cmd = build_ed_command(
-        ed_executable="/path/ED", ham_subdir="/ham", output_dir="/out",
-        num_sites=8, options=options, scalapack_threshold=16,
-        use_scalapack=True,
-    )
-    assert "--method=FULL" in cmd
+    for ok in ("FULL", "FULL_GPU", "LANCZOS", "FTLM", "FTLM_GPU", "mTPQ"):
+        assert can_run_in_process(ok), ok
+    for bad in ("SCALAPACK", "SCALAPACK_MIXED", "mTPQ_MPI"):
+        assert not can_run_in_process(bad), bad
 
 
-def test_build_ed_command_skips_eigenvalues_when_None():
+def test_ftlm_pipeline_options_carry_samples_and_krylov():
+    """An FTLM EDOptions carries the per-cluster sample/krylov knobs
+    that the in-process backend forwards to qed.EDParameters."""
     import qed_nlce  # noqa: F401
-    from qed_nlce.core import EDOptions, build_ed_command
+    from qed_nlce.core import EDOptions
 
-    cmd = build_ed_command(
-        ed_executable="/p/ED", ham_subdir="/h", output_dir="/o",
-        num_sites=4, options=EDOptions(method="FTLM", eigenvalues=None,
-                                       samples=10, krylov_dim=20),
-    )
-    assert not any(c.startswith("--eigenvalues=") for c in cmd)
-    assert "--samples=10" in cmd
-    assert "--krylov_dim=20" in cmd
+    opts = EDOptions(method="FTLM", eigenvalues=None, samples=10, krylov_dim=20)
+    assert opts.method == "FTLM"
+    assert opts.eigenvalues is None
+    assert opts.samples == 10
+    assert opts.krylov_dim == 20
 
 
 # ---------------------------------------------------------------------------

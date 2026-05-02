@@ -6,24 +6,17 @@ fallback readers). Those have been moved into
 :mod:`qed_nlce.core` as part of the package modernization
 (see :mod:`qed_nlce`'s docstring for the new layout).
 
-The original public symbols are re-exported from here so that
-external scripts that still write::
+The ``./ED`` subprocess bridge (``build_ed_command``,
+``run_ed_subprocess``, ``DEFAULT_ED_PATH``) has since been removed
+entirely: the ED step is now executed in-process via the ``qed``
+Python package (see :func:`qed_nlce.core.run_ed_in_process`).
 
-    from qed_nlce._common import (
-        EDOptions, build_ed_command, run_ed_subprocess, ...
-    )
-
-continue to work unchanged. New code should import directly from
-:mod:`qed_nlce.core` (or use the unified
-:mod:`qed_nlce.cli`) rather than going through this shim.
+This shim is kept for the remaining read-side helpers so that
+external scripts still doing ``from qed_nlce._common import
+load_thermo_dataset, ...`` continue to work.
 """
 
-from .core.ed_runner import (
-    DEFAULT_ED_PATH,
-    EDOptions,
-    build_ed_command,
-    run_ed_subprocess,
-)
+from .core.ed_runner import EDOptions
 from .core.io import (
     HAS_H5PY,
     ClusterEntry,
@@ -38,7 +31,6 @@ from .core.io import (
 
 __all__ = [
     "HAS_H5PY",
-    "DEFAULT_ED_PATH",
     "ClusterEntry",
     "EDOptions",
     "check_gpu_available",
@@ -46,8 +38,6 @@ __all__ = [
     "get_cluster_files",
     "get_num_sites",
     "count_sites_in_info_file",
-    "build_ed_command",
-    "run_ed_subprocess",
     "load_thermo_dataset",
     "load_tpq_thermo_dataset",
 ]

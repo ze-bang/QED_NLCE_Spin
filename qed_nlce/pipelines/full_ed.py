@@ -1,18 +1,18 @@
-"""Full / dense ED pipeline (with optional ScaLAPACK auto-promotion).
+"""Full / dense ED pipeline.
 
-This is the default pipeline. For each cluster:
-
-* small clusters (``num_sites < scalapack_threshold``) -> ``--method=FULL``;
-* large clusters -> ``--method=SCALAPACK_MIXED`` (auto-promoted by
-  :func:`build_ed_command` unless ``--no_scalapack`` is set);
-* if ``--method=FULL_GPU`` the user-supplied method is respected
-  verbatim, no auto-promotion.
+For each cluster, runs ``--method=FULL`` (or ``FULL_GPU`` if the user
+asks for it) in-process via the qed Python bindings.
 
 Summation kernel:
 
 * Pyrochlore -> ``NLC_sum.py``
 * Triangular -> ``NLC_sum_triangular.py`` (with the triangular-specific
   ``--temp_points_file`` / ``--resummation`` knobs forwarded).
+
+Note: the legacy ``SCALAPACK_MIXED`` auto-promotion has been removed.
+MPI-only methods cannot run in the in-process qed backend (a Python
+interpreter cannot call ``MPI_Init``); use the standalone
+``ed_distributed_main`` binary directly for those.
 """
 
 from __future__ import annotations
@@ -28,16 +28,21 @@ from ..geometries import _paths
 @register_pipeline
 class FullEDPipeline(Pipeline):
     name = "full_ed"
-    description = "Full dense ED (auto-promotes to SCALAPACK_MIXED for large clusters)."
+    description = "Full dense ED via the in-process qed backend."
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         g = parser.add_argument_group("full_ed pipeline")
         g.add_argument("--method", type=str, default="FULL",
-                       help="ED method (FULL, FULL_GPU, SCALAPACK_MIXED, ...)")
+                       help="ED method (FULL, FULL_GPU, LANCZOS, ...). "
+                            "MPI-only methods (SCALAPACK*, mTPQ_MPI) are "
+                            "rejected by the in-process backend.")
+        # Back-compat: legacy ScaLAPACK auto-promotion knobs are no
+        # longer used (the in-process backend cannot host MPI). Kept
+        # as silent argparse aliases so existing CLI lines do not break.
         g.add_argument("--scalapack_threshold", type=int, default=16,
-                       help="Site threshold for FULL -> SCALAPACK_MIXED promotion (default 16)")
+                       help=argparse.SUPPRESS)
         g.add_argument("--no_scalapack", action="store_true",
-                       help="Disable ScaLAPACK auto-promotion; always use the user method.")
+                       help=argparse.SUPPRESS)
         g.add_argument("--symmetrized", action="store_true",
                        help="Use --symmetrized (stronger guarantee than --symm)")
         g.add_argument("--measure_spin", action="store_true",

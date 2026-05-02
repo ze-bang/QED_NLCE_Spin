@@ -8,17 +8,20 @@
      ``Geometry.prepare_hamiltonian`` (one call per cluster).
   3. **Exact diagonalization** -- per cluster, the workflow asks
      ``Pipeline.make_ed_options(args, num_sites)`` for the per-cluster
-     options, builds the argv via :func:`build_ed_command`, and runs
-     it through :func:`run_ed_subprocess`.
-  4. **NLCE summation** -- delegated to ``Pipeline.summation_command``.
+     options and runs ED in-process via
+     :func:`qed_nlce.core.run_ed_in_process`, which calls the
+     ``qed`` Python package directly. There is no longer any ``./ED``
+     subprocess path.
+  4. **NLCE summation** -- delegated to ``Pipeline.summation_command``
+     (which still shells out to the pure-Python summation kernels in
+     :mod:`qed_nlce.run`).
 
 The orchestrator also handles:
   * the ``--streaming-symmetry`` orbit basis precompute step (delegated
     to ``Geometry.precompute_basis``),
   * directory layout (``clusters_*``, ``hamiltonians_*``, ``ed_results_*``,
     ``nlc_results_*``),
-  * per-cluster thermo plotting (when ``--thermo`` is on),
-  * parallelism (``--parallel`` + ``--num_cores``).
+  * per-cluster thermo plotting (when ``--thermo`` is on).
 
 Skipping any step is supported via ``--skip_cluster_gen``, ``--skip_ham_prep``,
 ``--skip_ed``, ``--skip_nlc``.
@@ -34,8 +37,7 @@ import subprocess
 import sys
 from typing import Optional
 
-from .ed_runner import build_ed_command, run_ed_subprocess
-from .qed_backend import can_run_in_process, qed_available, run_ed_in_process
+from .qed_backend import can_run_in_process, run_ed_in_process
 from .geometry import Geometry
 from .io import (
     ClusterEntry,
@@ -47,26 +49,6 @@ from .pipeline import Pipeline
 
 
 __all__ = ["NLCEWorkflow"]
-
-
-# Worker for multiprocessing.Pool (must be top-level / picklable).
-def _ed_worker(payload: tuple) -> bool:
-    """Pure function form of one ED launch. Picklable for multiprocessing."""
-    (cmd, output_root, extra_env, log_tag) = payload
-    return run_ed_subprocess(
-        cmd,
-        output_root=output_root,
-        extra_env=extra_env,
-        log_tag=log_tag,
-    )
-
-
-def _ed_inproc_worker(payload: tuple) -> bool:
-    """Pure function form of one in-process ED launch."""
-    (ham_subdir, output_dir, num_sites, options, log_tag) = payload
-    return run_ed_in_process(
-        ham_subdir, output_dir, num_sites, options, log_tag=log_tag,
-    )
 
 
 def _basis_worker(payload: tuple) -> bool:
@@ -246,30 +228,21 @@ class NLCEWorkflow:
 
     def _step3_ed(self, clusters: list[ClusterEntry]) -> None:
         logging.info("=" * 80)
-        logging.info("Step 3: Exact diagonalization (pipeline=%s)", self.pipeline.name)
+        logging.info(
+            "Step 3: Exact diagonalization in-process via `import qed` "
+            "(pipeline=%s)", self.pipeline.name,
+        )
         logging.info("=" * 80)
 
-        # Backend selection. qed is a required dep, so the in-process
-        # backend is the default. --no_in_process forces every cluster
-        # through the ./ED subprocess; MPI-only methods (SCALAPACK*,
-        # mTPQ_MPI) always use the subprocess regardless.
-        force_subprocess = bool(getattr(self.args, "no_in_process", False))
-        use_inproc_default = not force_subprocess and qed_available()
-        if not force_subprocess and not qed_available():
-            logging.warning(
-                "qed package not importable; falling back to ./ED "
-                "subprocess for all clusters. (qed is a required "
-                "dependency -- this should not normally happen.)"
-            )
+        n_total = 0
+        n_ok = 0
+        try:
+            from tqdm import tqdm
+            iterable = tqdm(clusters, desc="ED in-process")
+        except ImportError:
+            iterable = clusters
 
-        ed_executable = self.args.ed_executable
-        scalapack_threshold = getattr(self.args, "scalapack_threshold", 16)
-        use_scalapack = not getattr(self.args, "no_scalapack", False)
-
-        # Build all ED jobs up front so we can use a Pool cleanly.
-        subprocess_jobs: list[tuple] = []
-        inproc_jobs: list[tuple] = []
-        for cluster in clusters:
+        for cluster in iterable:
             ham_subdir = self._ham_subdir_for(cluster)
             ed_subdir = self._ed_subdir_for(cluster)
             os.makedirs(os.path.join(ed_subdir, "output"), exist_ok=True)
@@ -283,92 +256,27 @@ class NLCEWorkflow:
 
             options = self.pipeline.make_ed_options(self.args, num_sites)
 
-            # Decide per-cluster whether to use the in-process backend.
-            # Auto-promotion to SCALAPACK_MIXED happens inside
-            # build_ed_command, so we have to anticipate that here.
-            promoted_method = options.method
-            if (
-                options.method.upper() == "FULL"
-                and use_scalapack
-                and num_sites >= scalapack_threshold
-            ):
-                promoted_method = "SCALAPACK_MIXED"
+            if not can_run_in_process(options.method):
+                logging.error(
+                    "Method '%s' is not supported by the in-process qed "
+                    "backend (cluster %d, %d sites). MPI-only methods "
+                    "(SCALAPACK*, mTPQ_MPI) require an external MPI "
+                    "launcher; pick a non-MPI method.",
+                    options.method, cluster.cluster_id, num_sites,
+                )
+                continue
 
-            cluster_can_inproc = (
-                use_inproc_default and can_run_in_process(promoted_method)
-            )
             log_tag = f"{self.pipeline.name}:cluster_{cluster.cluster_id}"
+            n_total += 1
+            ok = run_ed_in_process(
+                ham_subdir, ed_subdir, num_sites, options, log_tag=log_tag,
+            )
+            if ok:
+                n_ok += 1
 
-            if cluster_can_inproc:
-                inproc_jobs.append(
-                    (ham_subdir, ed_subdir, num_sites, options, log_tag)
-                )
-            else:
-                if not os.path.exists(ed_executable):
-                    logging.error(
-                        "ED executable not found at %s. Build the project "
-                        "first (see https://github.com/ze-bang/QED), or pass "
-                        "--ed_executable=<path>, or set $QED_ED_BINARY.",
-                        ed_executable,
-                    )
-                    sys.exit(1)
-                cmd = build_ed_command(
-                    ed_executable=ed_executable,
-                    ham_subdir=ham_subdir,
-                    output_dir=ed_subdir,
-                    num_sites=num_sites,
-                    options=options,
-                    scalapack_threshold=scalapack_threshold,
-                    use_scalapack=use_scalapack,
-                )
-                extra_env = self.pipeline.extra_env(self.args, num_sites)
-                subprocess_jobs.append((cmd, ed_subdir, extra_env, log_tag))
-
-        n_total = len(subprocess_jobs) + len(inproc_jobs)
         if n_total == 0:
             logging.warning("No ED jobs to run.")
             return
-
-        logging.info(
-            "ED job dispatch: %d in-process (qed), %d subprocess (./ED)",
-            len(inproc_jobs), len(subprocess_jobs),
-        )
-
-        results: list[bool] = []
-        parallel = getattr(self.args, "parallel", False)
-        n_cores = self.args.num_cores
-
-        # In-process jobs: run sequentially in the main interpreter to
-        # share the qed module + its CUDA / OpenMP runtime context. (A
-        # multiprocessing.Pool would re-import qed in every worker which
-        # defeats the purpose.) For small clusters this is still much
-        # faster than forking ./ED.
-        if inproc_jobs:
-            try:
-                from tqdm import tqdm
-                iterable = tqdm(inproc_jobs, desc="ED in-process")
-            except ImportError:
-                iterable = inproc_jobs
-            results.extend(_ed_inproc_worker(j) for j in iterable)
-
-        # Subprocess jobs: optionally parallel.
-        if subprocess_jobs:
-            if parallel:
-                logging.info(
-                    "Running %d subprocess ED jobs in parallel with %d cores",
-                    len(subprocess_jobs), n_cores,
-                )
-                with multiprocessing.Pool(processes=n_cores) as pool:
-                    results.extend(pool.map(_ed_worker, subprocess_jobs))
-            else:
-                try:
-                    from tqdm import tqdm
-                    iterable = tqdm(subprocess_jobs, desc="Running ED")
-                except ImportError:
-                    iterable = subprocess_jobs
-                results.extend(_ed_worker(j) for j in iterable)
-
-        n_ok = sum(results)
         logging.info("ED: %d / %d clusters succeeded", n_ok, n_total)
 
     # ------------------------------------------------------------ step 4

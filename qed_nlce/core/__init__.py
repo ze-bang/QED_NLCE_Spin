@@ -8,7 +8,7 @@ research code is expected to subclass against:
   meaningful). One concrete subclass per supported lattice lives in
   ``qed_nlce.geometries``.
 
-* :class:`Pipeline` -- describes an ED strategy (which `./ED` method
+* :class:`Pipeline` -- describes an ED strategy (which qed method
   to use, which extra CLI flags to thread through, which NLCE
   summation kernel to call afterwards). One concrete subclass per
   ED strategy lives in ``qed_nlce.pipelines``.
@@ -17,22 +17,16 @@ research code is expected to subclass against:
   and runs the canonical four-step pipeline (clusters → Hamiltonians
   → ED → summation).
 
-* :class:`EDOptions` / :func:`build_ed_command` / :func:`run_ed_subprocess`
-  -- the only legal way for a ``Pipeline`` to talk to the C++ ``./ED``
-  binary. Centralizing this means CLI flag changes only need to be
-  audited in one place.
+* :class:`EDOptions` -- the per-cluster knobs each ``Pipeline`` fills
+  in. The in-process :func:`run_ed_in_process` translates them into a
+  :class:`qed.EDParameters` and dispatches to ``qed`` directly; there
+  is no ``./ED`` subprocess path.
 
 * I/O helpers (:func:`get_cluster_files`, :func:`load_thermo_dataset`,
   ...) -- the canonical readers for the on-disk schema.
 """
 
-from .ed_runner import (
-    DEFAULT_ED_PATH,
-    EDOptions,
-    build_ed_command,
-    discover_ed_binary,
-    run_ed_subprocess,
-)
+from .ed_runner import EDOptions
 from .qed_backend import (
     can_run_in_process,
     qed_available,
@@ -55,11 +49,7 @@ from .workflow import NLCEWorkflow
 
 __all__ = [
     # ed_runner
-    "DEFAULT_ED_PATH",
     "EDOptions",
-    "build_ed_command",
-    "discover_ed_binary",
-    "run_ed_subprocess",
     # qed_backend (in-process)
     "can_run_in_process",
     "qed_available",

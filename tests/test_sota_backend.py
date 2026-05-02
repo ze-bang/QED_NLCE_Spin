@@ -1,73 +1,19 @@
-"""Tests for the SOTA upgrades: ED binary discovery + in-process QED backend."""
+"""Tests for the in-process qed backend that replaces the ``./ED`` subprocess.
+
+The legacy binary-discovery and subprocess-builder code has been
+removed; the only ED execution path is now
+:func:`qed_nlce.core.run_ed_in_process`, which calls the ``qed`` Python
+package directly.
+"""
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
-from unittest import mock
-
-import pytest
 
 REPO_DIR = Path(__file__).resolve().parents[1]
 if str(REPO_DIR) not in sys.path:
     sys.path.insert(0, str(REPO_DIR))
-
-
-# ---------------------------------------------------------------------------
-# Binary discovery
-# ---------------------------------------------------------------------------
-
-
-def test_discover_ed_binary_honors_env_var(tmp_path, monkeypatch):
-    from qed_nlce.core import ed_runner
-
-    fake = tmp_path / "fake_ED"
-    fake.write_text("#!/bin/sh\nexit 0\n")
-    fake.chmod(0o755)
-
-    monkeypatch.setenv("QED_ED_BINARY", str(fake))
-    discovered = ed_runner.discover_ed_binary()
-    assert discovered == str(fake.resolve())
-
-
-def test_discover_ed_binary_falls_back_to_path(tmp_path, monkeypatch):
-    from qed_nlce.core import ed_runner
-
-    monkeypatch.delenv("QED_ED_BINARY", raising=False)
-    monkeypatch.delenv("ED_BINARY", raising=False)
-
-    fake_dir = tmp_path / "bin"
-    fake_dir.mkdir()
-    fake = fake_dir / "ED"
-    fake.write_text("#!/bin/sh\nexit 0\n")
-    fake.chmod(0o755)
-
-    monkeypatch.setenv("PATH", str(fake_dir))
-    monkeypatch.chdir(tmp_path)  # so cwd-relative candidates do not match
-    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
-
-    discovered = ed_runner.discover_ed_binary()
-    assert discovered == str(fake.resolve())
-
-
-def test_discover_ed_binary_returns_none_when_missing(tmp_path, monkeypatch):
-    from qed_nlce.core import ed_runner
-    import qed as _qed
-
-    monkeypatch.delenv('QED_ED_BINARY', raising=False)
-    monkeypatch.delenv('ED_BINARY', raising=False)
-    monkeypatch.setenv('PATH', str(tmp_path))  # empty
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv('VIRTUAL_ENV', raising=False)
-    # Force the qed-package fallback to point at a tmp dir with no ED
-    # binary so the last-resort branch finds nothing either.
-    fake_qed_dir = tmp_path / 'fake_qed'
-    fake_qed_dir.mkdir()
-    fake_init = fake_qed_dir / '__init__.py'
-    fake_init.write_text('')
-    with mock.patch.object(_qed, '__file__', str(fake_init)):
-        assert ed_runner.discover_ed_binary() is None
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +35,7 @@ def test_can_run_in_process_rejects_mpi_only_methods():
     assert not qed_backend.can_run_in_process("SCALAPACK")
     assert not qed_backend.can_run_in_process("SCALAPACK_MIXED")
     assert not qed_backend.can_run_in_process("mTPQ_MPI")
-    # Unknown methods → False (transparent fallback).
+    # Unknown methods -> False (transparent fallback).
     assert not qed_backend.can_run_in_process("BOGUS_METHOD_NAME")
 
 
@@ -104,21 +50,39 @@ def test_qed_available_returns_true():
 # ---------------------------------------------------------------------------
 
 
-def test_cli_recognizes_in_process_flags():
-    """``--no_in_process`` (subprocess opt-out) must be a valid CLI flag.
-    Legacy ``--in_process`` / ``--auto_in_process`` are kept as silent aliases.
+def test_cli_keeps_legacy_subprocess_flags_as_silent_noops():
+    """The subprocess path is gone, but the legacy CLI flags
+    (``--ed_executable``, ``--no_in_process``, ``--in_process``,
+    ``--auto_in_process``) still parse cleanly so that pre-existing
+    fit / convergence drivers do not break.
     """
+    import argparse
     from qed_nlce import cli
 
-    parser = __import__('argparse').ArgumentParser()
+    parser = argparse.ArgumentParser()
     cli._add_common_arguments(parser)
 
-    args = parser.parse_args(['--max_order', '3', '--no_in_process'])
-    assert args.no_in_process is True
-
-    # Legacy aliases still parse cleanly.
     args = parser.parse_args([
-        '--max_order', '3', '--in_process', '--auto_in_process',
+        '--max_order', '3',
+        '--ed_executable', '/some/legacy/path/ED',
+        '--no_in_process',
+        '--in_process',
+        '--auto_in_process',
     ])
+    # The values are stored but the workflow ignores them.
+    assert args.ed_executable == '/some/legacy/path/ED'
+    assert args.no_in_process is True
     assert args.in_process is True
     assert args.auto_in_process is True
+
+
+def test_cli_rejects_mpi_only_methods_in_preflight():
+    """Preflight aborts when the user requests an MPI-only method,
+    since the in-process backend cannot host MPI."""
+    import argparse
+    import pytest
+    from qed_nlce import cli
+
+    args = argparse.Namespace(method="SCALAPACK_MIXED", use_gpu=False)
+    with pytest.raises(SystemExit):
+        cli._preflight_build_introspection(args)

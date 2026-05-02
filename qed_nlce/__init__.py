@@ -1,14 +1,16 @@
 """NLCE (Numerical Linked Cluster Expansion) -- a standalone modern
-NLCE package built on top of the C++ ``./ED`` toolkit.
+NLCE package built on top of the ``qed`` Python package.
 
 Public package layout
 ---------------------
 
 * :mod:`qed_nlce.core`
     Abstractions: :class:`Geometry`, :class:`Pipeline`, registries,
-    :class:`NLCEWorkflow` orchestrator, and the canonical bridge to the
-    ``./ED`` binary (:class:`EDOptions`, :func:`build_ed_command`,
-    :func:`run_ed_subprocess`, plus I/O helpers).
+    :class:`NLCEWorkflow` orchestrator, and the in-process ED bridge
+    (:class:`EDOptions`, :func:`run_ed_in_process`, plus I/O helpers).
+    Each cluster's ED step is dispatched through
+    :func:`qed.exact_diagonalization_from_directory` directly; there
+    is no ``./ED`` subprocess path.
 
 * :mod:`qed_nlce.geometries`
     Concrete lattice implementations: ``pyrochlore``,
