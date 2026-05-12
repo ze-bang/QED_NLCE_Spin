@@ -311,7 +311,21 @@ class NLCEWorkflow:
             for c in clusters
         ]
         if getattr(self.args, "parallel", False):
-            with multiprocessing.Pool(processes=self.args.num_cores) as pool:
+            # Spawn + per-worker BLAS/OMP thread budgeting, mirroring the
+            # ED stage. Default-fork Pool would inherit the parent's
+            # OMP_NUM_THREADS in every worker, leading to
+            # num_cores * num_cores threads thrashing the CPU during the
+            # symmetry orbit precompute (which itself calls into qed
+            # internals that link OpenMP/BLAS).
+            total_cores = int(getattr(self.args, "num_cores", 1) or 1)
+            workers = max(1, min(total_cores, len(tasks)))
+            omp_threads = max(1, total_cores // workers)
+            ctx = multiprocessing.get_context("spawn")
+            with ctx.Pool(
+                processes=workers,
+                initializer=_ed_pool_initializer,
+                initargs=(omp_threads,),
+            ) as pool:
                 results = pool.map(_basis_worker, tasks)
         else:
             results = [_basis_worker(t) for t in tasks]

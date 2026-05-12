@@ -22,6 +22,38 @@ except ImportError:
     HAS_H5PY = False
     print("Warning: h5py not installed. HDF5 file reading will not be available.")
 
+
+# Module-level helper so it is picklable for multiprocessing.
+def _parse_cluster_file(file_path):
+    """Parse one cluster header file. Returns a dict or None on failure."""
+    match = re.search(r'cluster_(\d+)_order_(\d+)', file_path)
+    if not match:
+        return None
+    cluster_id, order = int(match.group(1)), int(match.group(2))
+    multiplicity = None
+    num_vertices = None
+    try:
+        with open(file_path, 'r') as f:
+            for line in f:
+                if line.startswith("# Multiplicity") and ":" in line:
+                    multiplicity = float(line.split(":")[-1].strip())
+                elif line.startswith("# Number of vertices:"):
+                    num_vertices = int(line.split(":")[1].strip())
+                if multiplicity is not None and num_vertices is not None:
+                    break
+    except OSError:
+        return None
+    if multiplicity is None or num_vertices is None:
+        return None
+    return {
+        'cluster_id': cluster_id,
+        'order': order,
+        'multiplicity': multiplicity,
+        'num_vertices': num_vertices,
+        'file_path': file_path,
+    }
+
+
 class NLCExpansion:
     def __init__(self, cluster_dir, eigenvalue_dir, temp_min, temp_max, num_temps, measure_spin, SI_units=False):
         """
@@ -48,51 +80,43 @@ class NLCExpansion:
         self.lanczos_boost_temp_max = None  # Maximum valid temperature for Lanczos-boosted results
         
     def read_clusters(self):
-        """Read all cluster information from files in the cluster directory."""
+        """Read all cluster information from files in the cluster directory.
+
+        Parsing each ``cluster_*_order_*.dat`` file is independent (read +
+        regex on a few header lines), so we parallelise across files when
+        the cluster set is large enough to amortise pool startup. Falls
+        back to a serial loop for small inputs and on any error.
+        """
         pattern = os.path.join(self.cluster_dir, "cluster_*_order_*.dat")
         cluster_files = glob.glob(pattern)
-        
-        for file_path in cluster_files:
-            # Extract cluster ID and order from filename
-            match = re.search(r'cluster_(\d+)_order_(\d+)', file_path)
-            if not match:
+
+        # Small inputs: serial is faster than starting workers.
+        PARALLEL_THRESHOLD = 64
+        if len(cluster_files) < PARALLEL_THRESHOLD:
+            results = [_parse_cluster_file(p) for p in cluster_files]
+        else:
+            try:
+                import concurrent.futures
+                max_workers = min(os.cpu_count() or 1, 8)
+                with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as ex:
+                    # chunksize amortises IPC overhead for thousands of small files
+                    results = list(ex.map(_parse_cluster_file, cluster_files, chunksize=32))
+            except Exception as e:  # pragma: no cover - defensive
+                print(f"Warning: parallel cluster parse failed ({e}); falling back to serial")
+                results = [_parse_cluster_file(p) for p in cluster_files]
+
+        for parsed in results:
+            if parsed is None:
                 continue
-                
-            cluster_id, order = int(match.group(1)), int(match.group(2))
-            
-            with open(file_path, 'r') as f:
-                lines = f.readlines()
-                
-            multiplicity = None
-            num_vertices = None
-            for line in lines:
-                # Handle both "# Multiplicity:" and "# Multiplicity (lattice constant):"
-                if line.startswith("# Multiplicity") and ":" in line:
-                    multiplicity = float(line.split(":")[-1].strip())
-                elif line.startswith("# Number of vertices:"):
-                    num_vertices = int(line.split(":")[1].strip())
-                
-                # Break if we found both values
-                if multiplicity is not None and num_vertices is not None:
-                    break
-            
-            if multiplicity is None:
-                print(f"Warning: Multiplicity not found for cluster {cluster_id}")
-                continue
-                
-            if num_vertices is None:
-                print(f"Warning: Number of vertices not found for cluster {cluster_id}")
-                continue
-                
+            cluster_id = parsed['cluster_id']
             self.clusters[cluster_id] = {
-                'order': order,
-                'multiplicity': multiplicity,
-                'num_vertices': num_vertices,
-                'file_path': file_path,
-                'eigenvalues': None,  # Will be loaded later
-                'sp': None,  # Will be loaded later
-                'sm': None,  # Will be loaded later
-                'sp': None   # Will be loaded later    
+                'order': parsed['order'],
+                'multiplicity': parsed['multiplicity'],
+                'num_vertices': parsed['num_vertices'],
+                'file_path': parsed['file_path'],
+                'eigenvalues': None,
+                'sp': None,
+                'sm': None,
             }
     def read_eigenvalues(self):
         """Read eigenvalues for each cluster from ED output files (HDF5 format).
