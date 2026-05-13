@@ -26,9 +26,14 @@ def _build_args(**overrides) -> argparse.Namespace:
         resummation="auto",
         quiet=False,
         verbose_plot=False,
-        auto_full_hilbert=1 << 16,
+        auto_full_hilbert=1 << 12,   # SOTA default (May 2026)
         auto_min_samples=40,
         auto_max_samples=200,
+        auto_backend="kpm_dos",      # SOTA default (May 2026)
+        auto_kpm_kernel="jackson",
+        auto_kpm_seed=0,
+        auto_kpm_moments=2048,
+        auto_kpm_random_vectors=32,  # SOTA default (May 2026)
     )
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -47,9 +52,21 @@ def test_auto_picks_full_for_small_clusters():
     assert opts.thermo is True
 
 
-def test_auto_picks_ftlm_above_crossover():
+def test_auto_picks_iterative_above_crossover_kpm_default():
+    """With the SOTA default backend (kpm_dos), large clusters get KPM_DOS."""
     pipe = get_pipeline("auto")
-    args = _build_args(auto_full_hilbert=64)  # force FTLM at 8 sites
+    args = _build_args(auto_full_hilbert=64)  # force iterative at 8 sites
+    opts = pipe.make_ed_options(args, num_sites=8)
+    assert opts.method == "KPM_DOS"
+    # KPM-DOS knobs are tunneled through samples / krylov_dim.
+    assert opts.samples == args.auto_kpm_random_vectors
+    assert opts.krylov_dim == args.auto_kpm_moments
+
+
+def test_auto_picks_ftlm_above_crossover_when_backend_overridden():
+    """Explicit `--auto_backend=ftlm` still routes to legacy FTLM."""
+    pipe = get_pipeline("auto")
+    args = _build_args(auto_full_hilbert=64, auto_backend="ftlm")
     opts = pipe.make_ed_options(args, num_sites=8)
     assert opts.method == "FTLM"
     assert opts.samples is not None and opts.samples >= args.auto_min_samples
@@ -57,8 +74,10 @@ def test_auto_picks_ftlm_above_crossover():
 
 
 def test_auto_sample_count_decays_with_size():
+    """Sample-count decay is an FTLM-backend property; pin the backend."""
     pipe = get_pipeline("auto")
-    args = _build_args(auto_full_hilbert=16, auto_min_samples=40, auto_max_samples=200)
+    args = _build_args(auto_full_hilbert=16, auto_min_samples=40,
+                       auto_max_samples=200, auto_backend="ftlm")
     s_small = pipe.make_ed_options(args, num_sites=6).samples   # 2^6 = 64
     s_large = pipe.make_ed_options(args, num_sites=14).samples  # 2^14 = 16384
     assert s_small >= s_large

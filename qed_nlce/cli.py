@@ -155,6 +155,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         _print_listing()
         return 0
 
+    # Pipeline now defaults to the SOTA ``auto`` hybrid (FULL <= 2**12,
+    # KPM-DOS above) when only --geometry was given. Geometry itself
+    # is still required (each lattice has its own cluster generator).
+    if pre_args.geometry is not None and pre_args.pipeline is None:
+        pre_args.pipeline = "auto"
+
     if pre_args.geometry is None or pre_args.pipeline is None:
         # User wants help, or forgot the required selectors. Build a
         # parser with just the selectors + common args so --help is

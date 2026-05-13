@@ -24,7 +24,7 @@ from typing import Optional
 import numpy as np
 
 
-PIPELINES = ["full_ed", "lanczos_boost", "ftlm"]
+PIPELINES = ["full_ed", "lanczos_boost", "ftlm", "auto"]
 
 
 def run_pipeline(name: str, base_dir: str, args) -> dict:
@@ -179,7 +179,7 @@ def main() -> int:
             continue
         ref_T, ref_Y = ref_curve
         report["accuracy_vs_full_ed"][obs] = {}
-        for name in ("lanczos_boost", "ftlm"):
+        for name in ("lanczos_boost", "ftlm", "auto"):
             r = runs[name]
             if r["exit_code"] != 0 or r["nlc_dir"] is None:
                 continue

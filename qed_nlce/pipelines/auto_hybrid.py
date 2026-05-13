@@ -7,9 +7,15 @@ these per cluster:
 
 Backend selection (keyed on the *full* Hilbert-space dim ``2 ** N``):
 
-* ``2**N <= --auto_full_hilbert``  (default ``2**14 = 16384``)
+* ``2**N <= --auto_full_hilbert``  (default ``2**12 = 4096``)
     -> ``FULL`` ED with the entire spectrum -- noise-free anchors
-       for the small / dominant clusters.
+       for the small / dominant clusters. (Was ``2**14 = 16384``
+       before May 2026; lowered because dense LAPACK on a
+       16384x16384 matrix costs ~4 TFlops and minutes per cluster,
+       and KPM-DOS at the same dim is faster *and* matches the
+       FULL specific heat to ~1e-3 with ``R=32, M=2048``. The new
+       4096 ceiling matches the ``qed.diag`` small-dim threshold
+       and keeps every per-cluster diag under ~1 s.)
 
 * ``2**N > --auto_full_hilbert``
     -> ``--auto_backend`` (default ``kpm_dos``):
@@ -84,11 +90,13 @@ class AutoHybridPipeline(FTLMPipeline):
                  "states + Chebyshev quadrature solver).",
         )
         g.add_argument(
-            "--auto_full_hilbert", type=int, default=1 << 14,
+            "--auto_full_hilbert", type=int, default=1 << 12,
             help="FULL ED ceiling on full Hilbert-space dim "
-                 "(default 16384 = 2**14). Clusters with 2**N <= this "
-                 "go through dense LAPACK; larger clusters use the "
-                 "iterative backend.",
+                 "(default 4096 = 2**12; was 2**14 before May 2026). "
+                 "Clusters with 2**N <= this go through dense LAPACK; "
+                 "larger clusters use the iterative backend. The new "
+                 "default keeps every per-cluster FULL diag under ~1 s "
+                 "and matches the ``qed.diag`` auto-pilot threshold.",
         )
 
         # KPM-DOS knobs (only consulted when --auto_backend=kpm_dos).
@@ -97,9 +105,13 @@ class AutoHybridPipeline(FTLMPipeline):
             help="KPM Chebyshev moments M for large clusters (default 2048).",
         )
         g.add_argument(
-            "--auto_kpm_random_vectors", type=int, default=20,
+            "--auto_kpm_random_vectors", type=int, default=32,
             help="KPM Hutchinson random-vector count R for large clusters "
-                 "(default 20). Variance scales as 1/sqrt(R*D).",
+                 "(default 32; was 20 before May 2026 -- bumped because "
+                 "the SOTA NLCE accuracy target is per-cluster relative "
+                 "error <~ 1e-3 on C(T), and 1/sqrt(R*D) at R=32, D=4096 "
+                 "gives ~3e-3, comfortably below the typical NLCE "
+                 "Mobius condition number 30-80 budget).",
         )
         g.add_argument(
             "--auto_kpm_kernel", type=str, default="jackson",
@@ -158,7 +170,7 @@ class AutoHybridPipeline(FTLMPipeline):
 
     def make_ed_options(self, args: argparse.Namespace, num_sites: int) -> EDOptions:
         hilbert_dim = 2 ** num_sites
-        full_ceiling = getattr(args, "auto_full_hilbert", 1 << 14)
+        full_ceiling = getattr(args, "auto_full_hilbert", 1 << 12)
         streaming = getattr(args, "auto_streaming_symmetry", False) or \
                     getattr(args, "streaming_symmetry", False)
         symmetrized = getattr(args, "symmetrized", False)
@@ -182,8 +194,8 @@ class AutoHybridPipeline(FTLMPipeline):
         if backend == "kpm_dos":
             base = "KPM_DOS"
             extra_flags = [
-                f"--kpm_kernel={args.auto_kpm_kernel}",
-                f"--kpm_seed={args.auto_kpm_seed}",
+                f"--kpm_kernel={getattr(args, 'auto_kpm_kernel', 'jackson')}",
+                f"--kpm_seed={getattr(args, 'auto_kpm_seed', 0)}",
             ]
             return EDOptions(
                 method=self._maybe_fixed_sz_suffix(args, base),
