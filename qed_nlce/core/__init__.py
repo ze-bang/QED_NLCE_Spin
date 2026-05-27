@@ -18,9 +18,10 @@ research code is expected to subclass against:
   → ED → summation).
 
 * :class:`EDOptions` -- the per-cluster knobs each ``Pipeline`` fills
-  in. The in-process :func:`run_ed_in_process` translates them into a
-  :class:`qed.EDParameters` and dispatches to ``qed`` directly; there
-  is no ``./ED`` subprocess path.
+  in. The in-process :func:`run_ed_in_process` translates them into
+  kwargs for the canonical ``qed.solve(H, ...)`` / ``qed.thermal(H,
+  ...)`` Python verbs and dispatches to ``qed`` directly; there is
+  no ``./ED`` subprocess path.
 
 * I/O helpers (:func:`get_cluster_files`, :func:`load_thermo_dataset`,
   ...) -- the canonical readers for the on-disk schema.

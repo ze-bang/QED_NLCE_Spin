@@ -12,8 +12,8 @@ package was renamed `workflows.nlce` → `qed_nlce`.
 
 ```bash
 # Install the QED Python package (required runtime dep). qed_nlce
-# calls qed.exact_diagonalization_from_directory(...) directly --
-# the C++ ./ED binary is no longer invoked.
+# calls the canonical qed.solve(H, ...) / qed.thermal(H, ...)
+# Python verbs directly -- the C++ ./ED binary is no longer invoked.
 git clone https://github.com/ze-bang/QED.git
 cd QED && pip install .
 
@@ -131,9 +131,11 @@ qed-nlce --geometry triangular_site --pipeline auto --max_order 8 \
 ## Backend
 
 Every cluster is diagonalized in-process by importing `qed` and
-calling `qed.exact_diagonalization_from_directory(...)`. This
-eliminates the per-cluster fork + OpenMP / CUDA initialization
-overhead that dominates wall-time at high NLCE orders.
+dispatching through the canonical three-verb Python surface
+(`qed.solve` for ground-state lanes / `qed.thermal` for FTLM,
+LTLM, KPM-DOS, mTPQ, cTPQ). This eliminates the per-cluster fork +
+OpenMP / CUDA initialization overhead that dominates wall-time at
+high NLCE orders.
 
 MPI-only methods (`SCALAPACK`, `SCALAPACK_MIXED`, `mTPQ_MPI`) are
 **not** supported by the in-process backend — a Python interpreter
@@ -162,18 +164,19 @@ back-compat but ignored.
 
 `qed_nlce` depends on QED purely through the `qed` Python package (a
 required runtime dependency, declared in `pyproject.toml`). Every
-cluster's ED is dispatched in-process via QED's Phase 7+ canonical
-5-axis dispatcher (orthogonal `use_gpu` / `use_mpi` / `use_fixed_sz` /
-`use_symmetry` axes).
+cluster's ED is dispatched in-process via QED's canonical three-verb
+Python surface (`qed.solve` / `qed.thermal` / `qed.spectral`), which
+internally routes through the Phase 7+ 5-axis dispatcher (orthogonal
+`use_gpu` / `use_mpi` / `use_fixed_sz` / `use_symmetry` axes).
 
 `qed_nlce` does **not** link against any QED C++ library, does **not**
 have a build-time dependency on QED, and does **not** invoke the
 `./ED` binary as a subprocess.
 
 Build-introspection preflight uses `qed.has_cuda_build()` /
-`qed.has_mpi_build()` / `qed.has_scalapack_build()` to abort early
-when the requested method is incompatible with the installed `qed`
-build.
+`qed.has_mpi_build()` to abort early when the requested method is
+incompatible with the installed `qed` build (e.g. asking for a `*_GPU`
+method against a CPU-only build).
 
 ## License
 

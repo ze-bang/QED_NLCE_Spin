@@ -8,9 +8,9 @@ Public package layout
     Abstractions: :class:`Geometry`, :class:`Pipeline`, registries,
     :class:`NLCEWorkflow` orchestrator, and the in-process ED bridge
     (:class:`EDOptions`, :func:`run_ed_in_process`, plus I/O helpers).
-    Each cluster's ED step is dispatched through
-    :func:`qed.exact_diagonalization_from_directory` directly; there
-    is no ``./ED`` subprocess path.
+    Each cluster's ED step is dispatched through the canonical
+    ``qed.solve(H, ...)`` / ``qed.thermal(H, ...)`` Python verbs
+    directly; there is no ``./ED`` subprocess path.
 
 * :mod:`qed_nlce.geometries`
     Concrete lattice implementations: ``pyrochlore``,

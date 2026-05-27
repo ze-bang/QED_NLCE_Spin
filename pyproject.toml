@@ -21,12 +21,13 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
-    # qed is a *required* dep: NLCE pipelines call
-    # qed.exact_diagonalization_from_directory(...) in-process by
-    # default. The ./ED subprocess path remains as a fallback for
-    # MPI-only methods (SCALAPACK*, mTPQ_MPI), but is no longer
-    # the primary execution mode.
-    "qed>=0.2.0",
+    # qed is a *required* dep: NLCE pipelines dispatch each cluster
+    # in-process through the canonical qed.solve(H, ...) /
+    # qed.thermal(H, ...) Python verbs. MPI-only methods (SCALAPACK*,
+    # mTPQ_MPI) are not supported by the in-process backend; for
+    # those, invoke the standalone ed_distributed_main directly under
+    # mpiexec.
+    "qed>=0.3.0",
     "numpy>=1.23",
     "scipy>=1.10",
     "h5py>=3.7",
