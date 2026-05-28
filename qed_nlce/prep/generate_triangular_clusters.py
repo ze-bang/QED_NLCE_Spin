@@ -30,6 +30,8 @@ import sys
 import os
 from collections import defaultdict
 
+import pynauty
+
 
 def extract_cluster_info(lattice, pos, cluster_nodes):
     """
@@ -189,41 +191,32 @@ def create_triangular_lattice(L, periodic=True):
     return G, pos
 
 
+def _nx_to_pynauty(G, nodes):
+    """Convert an induced subgraph to a pynauty.Graph with canonical node ordering."""
+    nodes_sorted = sorted(nodes)
+    n = len(nodes_sorted)
+    node_to_idx = {v: i for i, v in enumerate(nodes_sorted)}
+    pg = pynauty.Graph(n)
+    for u, v in G.subgraph(nodes).edges():
+        pg.connect_vertex(node_to_idx[u], [node_to_idx[v]])
+    return pg
+
+
 def compute_automorphism_count(G, nodes):
     """
-    Compute |Aut(c)|, the number of automorphisms of the cluster graph.
+    Compute |Aut(c)| using nauty (orders of magnitude faster than VF2 enumeration).
     """
-    H = G.subgraph(nodes).copy()
-    mapping = {n: i for i, n in enumerate(sorted(H.nodes()))}
-    H = nx.relabel_nodes(H, mapping, copy=True)
-    
-    GM = nx.isomorphism.GraphMatcher(H, H)
-    return sum(1 for _ in GM.isomorphisms_iter())
+    pg = _nx_to_pynauty(G, nodes)
+    return int(pynauty.autgrp(pg)[1])
 
 
-def _wl_hash_subgraph(G, nodes):
+def _canonical_certificate(G, nodes):
     """
-    Compute an isomorphism-invariant hash for the induced subgraph.
+    Compute a canonical certificate (bytes) for the induced subgraph using nauty.
+    Two graphs are isomorphic iff their certificates are equal.
     """
-    H = G.subgraph(nodes).copy()
-    mapping = {n: i for i, n in enumerate(sorted(H.nodes()))}
-    H = nx.relabel_nodes(H, mapping, copy=True)
-    
-    try:
-        from networkx.algorithms.graph_hashing import weisfeiler_lehman_graph_hash
-        return weisfeiler_lehman_graph_hash(H)
-    except ImportError:
-        pass
-    
-    try:
-        from networkx.algorithms.isomorphism import weisfeiler_lehman_graph_hash
-        return weisfeiler_lehman_graph_hash(H)
-    except ImportError:
-        pass
-    
-    # Fallback: degree sequence signature
-    degs = sorted([d for _, d in H.degree()])
-    return f"{len(H)}|{H.number_of_edges()}|{tuple(degs)}"
+    pg = _nx_to_pynauty(G, nodes)
+    return pynauty.certificate(pg)
 
 
 def generate_clusters(lattice, max_order):
@@ -231,7 +224,7 @@ def generate_clusters(lattice, max_order):
     Generate all topologically distinct site-based clusters up to max_order.
     
     Uses anchored expansion to enumerate all connected subgraphs,
-    then groups by isomorphism class.
+    then deduplicates via nauty canonical certificates (O(1) lookup per graph).
     
     Args:
         lattice: NetworkX graph of the triangular lattice
@@ -248,7 +241,6 @@ def generate_clusters(lattice, max_order):
     N = lattice.number_of_nodes()
     nodes_sorted = sorted(lattice.nodes())
     
-    # Check coordination
     degrees = [lattice.degree(n) for n in nodes_sorted]
     if min(degrees) == max(degrees) == 6:
         print(f"  Lattice has {N} sites (all with z=6, PBC working correctly)")
@@ -259,7 +251,6 @@ def generate_clusters(lattice, max_order):
         print(f"Generating clusters of order {order}...")
         
         if order == 1:
-            # Single site: L = 1 (every site is equivalent)
             first_site = nodes_sorted[0]
             distinct_clusters.append([first_site])
             multiplicities.append(1.0)
@@ -274,11 +265,10 @@ def generate_clusters(lattice, max_order):
             print(f"    Topology 1: L = {N} / {N} = 1.0000")
             continue
         
-        # Hash buckets for clustering by isomorphism
-        buckets = defaultdict(list)
+        # Nauty certificate -> (representative_nodes, embedding_count)
+        cert_map: dict[bytes, tuple[frozenset, int]] = {}
         
         for anchor in nodes_sorted:
-            # Anchored expansion: only allow nodes >= anchor
             start = frozenset([anchor])
             frontier = set(n for n in lattice.neighbors(anchor) if n >= anchor)
             visited = set()
@@ -292,50 +282,35 @@ def generate_clusters(lattice, max_order):
                 visited.add(current)
                 
                 if len(current) == order:
-                    sig = _wl_hash_subgraph(lattice, current)
-                    
-                    # Check isomorphism within same hash bucket
-                    placed = False
-                    for idx, (rep_nodes, cnt) in enumerate(buckets[sig]):
-                        if nx.is_isomorphic(
-                            lattice.subgraph(current),
-                            lattice.subgraph(rep_nodes)
-                        ):
-                            buckets[sig][idx] = (rep_nodes, cnt + 1)
-                            placed = True
-                            break
-                    
-                    if not placed:
-                        buckets[sig].append((current, 1))
+                    cert = _canonical_certificate(lattice, current)
+                    if cert in cert_map:
+                        rep, cnt = cert_map[cert]
+                        cert_map[cert] = (rep, cnt + 1)
+                    else:
+                        cert_map[cert] = (current, 1)
                     continue
                 
-                # Expand frontier
                 for nxt in list(fr):
                     new_set = current | {nxt}
                     new_frontier = (fr | set(lattice.neighbors(nxt))) - new_set
                     new_frontier = {x for x in new_frontier if x >= anchor}
                     stack.append((new_set, new_frontier))
         
-        # Collect representatives and compute multiplicities
         reps = []
         mults = []
         order_mult_details = []
         
-        for sig_groups in buckets.values():
-            for rep_nodes, raw_count in sig_groups:
-                # L(c) = |Emb(c→L)| / N_sites
-                # raw_count = |Emb(c→L)| (number of labeled embeddings)
-                L = raw_count / N
-                
-                reps.append(sorted(rep_nodes))
-                mults.append(L)
-                order_mult_details.append({
-                    'raw_count': raw_count,
-                    'N_sites': N,
-                    'L': L
-                })
+        for rep_nodes, raw_count in cert_map.values():
+            L = raw_count / N
+            reps.append(sorted(rep_nodes))
+            mults.append(L)
+            order_mult_details.append({
+                'raw_count': raw_count,
+                'N_sites': N,
+                'L': L
+            })
         
-        # Sort clusters deterministically
+        # Deterministic sort
         def cluster_sort_key(idx):
             rep = reps[idx]
             mult = mults[idx]
@@ -354,7 +329,6 @@ def generate_clusters(lattice, max_order):
         multiplicities.extend(mults)
         all_mult_details.extend(order_mult_details)
         
-        # Print verbose multiplicity calculations
         print(f"  Found {len(reps)} distinct clusters of order {order}")
         print(f"  Multiplicity formula: L = |Emb(c→L)| / N_sites = raw_count / {N}")
         for idx, details in enumerate(order_mult_details):
@@ -400,9 +374,18 @@ def compute_subcluster_multiplicities(cluster_nodes, subcluster_nodes, lattice, 
 
 def identify_subclusters(distinct_clusters, lattice):
     """
-    Identify all topological subclusters for each distinct cluster 
+    Identify all topological subclusters for each distinct cluster
     and their multiplicities Y_cs.
+    
+    Uses nauty canonical certificates for O(1) isomorphism lookup instead
+    of pairwise VF2 comparison -- critical speedup at order >= 6.
     """
+    # Pre-build a certificate -> cluster_index lookup for all distinct clusters
+    cert_to_idx: dict[bytes, int] = {}
+    for i, cluster in enumerate(distinct_clusters):
+        cert = _canonical_certificate(lattice, cluster)
+        cert_to_idx[cert] = i
+
     clusters_by_order = defaultdict(list)
     for i, cluster in enumerate(distinct_clusters):
         clusters_by_order[len(cluster)].append((i, cluster))
@@ -417,7 +400,6 @@ def identify_subclusters(distinct_clusters, lattice):
             continue
         
         for order in range(1, cluster_order):
-            candidates = clusters_by_order[order]
             subcluster_counts = defaultdict(int)
             
             for subcluster_set in itertools.combinations(cluster, order):
@@ -426,11 +408,9 @@ def identify_subclusters(distinct_clusters, lattice):
                 if not nx.is_connected(subgraph):
                     continue
                 
-                for cand_idx, cand_cluster in candidates:
-                    cand_subgraph = lattice.subgraph(cand_cluster)
-                    if nx.is_isomorphic(subgraph, cand_subgraph):
-                        subcluster_counts[cand_idx] += 1
-                        break
+                cert = _canonical_certificate(lattice, subcluster_set)
+                if cert in cert_to_idx:
+                    subcluster_counts[cert_to_idx[cert]] += 1
             
             for subcluster_idx, count in subcluster_counts.items():
                 subclusters_info[i].append((subcluster_idx, count))

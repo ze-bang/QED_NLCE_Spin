@@ -30,6 +30,8 @@ import sys
 import os
 from collections import defaultdict
 
+import pynauty
+
 
 def extract_cluster_info(lattice, pos, tetrahedra, cluster):
     """
@@ -267,55 +269,32 @@ def build_tetrahedron_graph(tetrahedra):
     return tet_graph
 
 
+def _nx_to_pynauty(G, nodes):
+    """Convert an induced subgraph to a pynauty.Graph with canonical node ordering."""
+    nodes_sorted = sorted(nodes)
+    n = len(nodes_sorted)
+    node_to_idx = {v: i for i, v in enumerate(nodes_sorted)}
+    pg = pynauty.Graph(n)
+    for u, v in G.subgraph(nodes).edges():
+        pg.connect_vertex(node_to_idx[u], [node_to_idx[v]])
+    return pg
+
+
 def compute_automorphism_count(G, nodes):
     """
-    Compute |Aut(c)|, the number of automorphisms of the cluster graph.
-    
-    An automorphism is a permutation of nodes that preserves adjacency.
-    This is needed for the multiplicity formula:
-    L(c) = |labeled embeddings| / (N_tet * |Aut(c)|)
-    
-    Args:
-        G: The full tetrahedron graph
-        nodes: Set/list of nodes defining the cluster
-    
-    Returns:
-        Number of automorphisms of the induced subgraph
+    Compute |Aut(c)| using nauty (orders of magnitude faster than VF2 enumeration).
     """
-    H = G.subgraph(nodes).copy()
-    # Relabel to compact range for consistent comparison
-    mapping = {n: i for i, n in enumerate(sorted(H.nodes()))}
-    H = nx.relabel_nodes(H, mapping, copy=True)
-    
-    # Use VF2 to find all automorphisms
-    GM = nx.isomorphism.GraphMatcher(H, H)
-    return sum(1 for _ in GM.isomorphisms_iter())
+    pg = _nx_to_pynauty(G, nodes)
+    return int(pynauty.autgrp(pg)[1])
 
 
-def _wl_hash_subgraph(G, nodes):
+def _canonical_certificate(G, nodes):
     """
-    Compute an isomorphism-invariant hash for the induced subgraph.
-    Uses Weisfeiler-Lehman graph hashing for fast comparison.
+    Compute a canonical certificate (bytes) for the induced subgraph using nauty.
+    Two graphs are isomorphic iff their certificates are equal.
     """
-    H = G.subgraph(nodes).copy()
-    mapping = {n: i for i, n in enumerate(sorted(H.nodes()))}
-    H = nx.relabel_nodes(H, mapping, copy=True)
-    
-    try:
-        from networkx.algorithms.graph_hashing import weisfeiler_lehman_graph_hash
-        return weisfeiler_lehman_graph_hash(H)
-    except ImportError:
-        pass
-    
-    try:
-        from networkx.algorithms.isomorphism import weisfeiler_lehman_graph_hash
-        return weisfeiler_lehman_graph_hash(H)
-    except ImportError:
-        pass
-    
-    # Fallback: degree sequence signature
-    degs = sorted([d for _, d in H.degree()])
-    return f"{len(H)}|{H.number_of_edges()}|{tuple(degs)}"
+    pg = _nx_to_pynauty(G, nodes)
+    return pynauty.certificate(pg)
 
 
 def generate_clusters(tet_graph, max_order):
@@ -323,19 +302,7 @@ def generate_clusters(tet_graph, max_order):
     Generate all topologically distinct clusters up to max_order.
     
     Uses anchored expansion to enumerate all connected subgraphs,
-    then groups by isomorphism class. Multiplicities are computed as:
-    
-    L_tet(c) = |Emb(c→L)| / N_tet  (unlabeled embeddings per tetrahedron)
-    
-    With PBC, all tetrahedra have z=4 coordination, so we can use all nodes.
-    The anchored expansion ensures each unlabeled cluster is counted once.
-    
-    For order n tree topologies on diamond lattice (z=4):
-      - Order 1: L = 1
-      - Order 2: L = z/2 = 2  
-      - Order 3: L = z(z-1)/2 = 6
-      - Order 4 chain: L = z(z-1)²/2 = 18
-      - Order 4 star: L = C(z,3) = 4
+    then deduplicates via nauty canonical certificates (O(1) lookup per graph).
     
     Args:
         tet_graph: Diamond lattice graph (tetrahedra as nodes)
@@ -348,12 +315,10 @@ def generate_clusters(tet_graph, max_order):
     """
     distinct_clusters = []
     multiplicities = []
-    all_mult_details = []  # Store formula details for all clusters
+    all_mult_details = []
     N = tet_graph.number_of_nodes()
     nodes_sorted = sorted(tet_graph.nodes())
     
-    # With PBC, all nodes should have coordination 4
-    # For open boundaries, we still use all nodes but results may have boundary effects
     degrees = [tet_graph.degree(n) for n in nodes_sorted]
     if min(degrees) == max(degrees) == 4:
         print(f"  Lattice has {N} tetrahedra (all with z=4, PBC working correctly)")
@@ -364,12 +329,11 @@ def generate_clusters(tet_graph, max_order):
         print(f"Generating clusters of order {order}...")
         
         if order == 1:
-            # Single tetrahedron: L_tet = 1, L_pyro = 0.5
             first_tet = nodes_sorted[0]
             distinct_clusters.append([first_tet])
-            multiplicities.append(0.5)  # L_pyro = L_tet / 2 = 1/2
+            multiplicities.append(0.5)
             all_mult_details.append({
-                'raw_count': N,  # Every tetrahedron is an embedding
+                'raw_count': N,
                 'N_tet': N,
                 'L_tet': 1.0,
                 'L_pyro': 0.5
@@ -379,13 +343,10 @@ def generate_clusters(tet_graph, max_order):
             print(f"    Topology 1: L_pyro = {N} / {N} / 2 = 0.5000")
             continue
         
-        # Hash buckets: signature -> list of (rep_nodes_frozenset, raw_embedding_count)
-        # With PBC, all nodes are equivalent, so we can anchor at any node
-        buckets = defaultdict(list)
+        # Nauty certificate -> (representative_nodes, embedding_count)
+        cert_map: dict[bytes, tuple[frozenset, int]] = {}
         
         for anchor in nodes_sorted:
-            # Anchored expansion: only allow nodes >= anchor
-            # This ensures each unlabeled embedding is counted once
             start = frozenset([anchor])
             frontier = set(n for n in tet_graph.neighbors(anchor) if n >= anchor)
             visited = set()
@@ -399,68 +360,44 @@ def generate_clusters(tet_graph, max_order):
                 visited.add(current)
                 
                 if len(current) == order:
-                    # Found a cluster of target size
-                    sig = _wl_hash_subgraph(tet_graph, current)
-                    
-                    # Check isomorphism within same hash bucket
-                    placed = False
-                    for idx, (rep_nodes, cnt) in enumerate(buckets[sig]):
-                        if nx.is_isomorphic(
-                            tet_graph.subgraph(current),
-                            tet_graph.subgraph(rep_nodes)
-                        ):
-                            buckets[sig][idx] = (rep_nodes, cnt + 1)
-                            placed = True
-                            break
-                    
-                    if not placed:
-                        buckets[sig].append((current, 1))
+                    cert = _canonical_certificate(tet_graph, current)
+                    if cert in cert_map:
+                        rep, cnt = cert_map[cert]
+                        cert_map[cert] = (rep, cnt + 1)
+                    else:
+                        cert_map[cert] = (current, 1)
                     continue
                 
-                # Expand frontier
                 for nxt in list(fr):
                     new_set = current | {nxt}
                     new_frontier = (fr | set(tet_graph.neighbors(nxt))) - new_set
                     new_frontier = {x for x in new_frontier if x >= anchor}
                     stack.append((new_set, new_frontier))
         
-        # Collect representatives and compute multiplicities
         reps = []
         mults = []
-        order_mult_details = []  # Store details for verbose output
+        order_mult_details = []
         
-        for sig_groups in buckets.values():
-            for rep_nodes, raw_count in sig_groups:
-                # raw_count = number of anchored embeddings found
-                # Due to anchoring, each unlabeled embedding is counted once
-                # L_tet(c) = raw_count / N (per tetrahedron)
-                # L_pyro(c) = L_tet / 2 (per pyrochlore site, since N_site = 2 * N_tet)
-                
-                L_tet = raw_count / N
-                L_pyro = L_tet / 2
-                
-                reps.append(sorted(rep_nodes))
-                mults.append(L_pyro)
-                order_mult_details.append({
-                    'raw_count': raw_count,
-                    'N_tet': N,
-                    'L_tet': L_tet,
-                    'L_pyro': L_pyro
-                })
+        for rep_nodes, raw_count in cert_map.values():
+            L_tet = raw_count / N
+            L_pyro = L_tet / 2
+            reps.append(sorted(rep_nodes))
+            mults.append(L_pyro)
+            order_mult_details.append({
+                'raw_count': raw_count,
+                'N_tet': N,
+                'L_tet': L_tet,
+                'L_pyro': L_pyro
+            })
         
-        # CRITICAL: Sort clusters deterministically to ensure consistent ID assignment
-        # Sort by: (multiplicity descending, then by canonical graph representation)
-        # This ensures the same cluster always gets the same ID across different runs
+        # Deterministic sort for consistent ID assignment
         def cluster_sort_key(idx):
             rep = reps[idx]
             mult = mults[idx]
-            # Create canonical graph representation: sorted edge list
             subgraph = tet_graph.subgraph(rep)
-            # Map to canonical node labels
             node_map = {n: i for i, n in enumerate(sorted(rep))}
             edges = sorted((node_map[u], node_map[v]) if node_map[u] < node_map[v] 
                           else (node_map[v], node_map[u]) for u, v in subgraph.edges())
-            # Sort by multiplicity (descending) then by edge tuple (for determinism)
             return (-mult, tuple(edges))
         
         sorted_indices = sorted(range(len(reps)), key=cluster_sort_key)
@@ -472,7 +409,6 @@ def generate_clusters(tet_graph, max_order):
         multiplicities.extend(mults)
         all_mult_details.extend(order_mult_details)
         
-        # Print verbose multiplicity calculations
         print(f"  Found {len(reps)} distinct clusters of order {order}")
         print(f"  Multiplicity formula: L_pyro = |Emb(c→L)| / N_tet / 2 = raw_count / {N} / 2")
         for idx, details in enumerate(order_mult_details):
@@ -550,21 +486,18 @@ def compute_subcluster_multiplicities(cluster_nodes, subcluster_nodes, tet_graph
 
 def identify_subclusters(distinct_clusters, tet_graph):
     """
-    Identify all topological subclusters for each distinct cluster 
+    Identify all topological subclusters for each distinct cluster
     and their multiplicities Y_cs.
     
-    For each cluster c, we find all connected subclusters s ⊂ c,
-    match them to distinct cluster types, and compute:
-    Y_cs = |Emb(s→c)| / |Aut(s)|
-    
-    Args:
-        distinct_clusters: List of topologically distinct cluster representatives
-        tet_graph: NetworkX graph where nodes are tetrahedra
-    
-    Returns:
-        Dictionary mapping cluster indices to list of (subcluster_idx, Y_cs)
+    Uses nauty canonical certificates for O(1) isomorphism lookup instead
+    of pairwise VF2 comparison -- critical speedup at order >= 6.
     """
-    # Group distinct clusters by order for efficient lookup
+    # Pre-build a certificate -> cluster_index lookup for all distinct clusters
+    cert_to_idx: dict[bytes, int] = {}
+    for i, cluster in enumerate(distinct_clusters):
+        cert = _canonical_certificate(tet_graph, cluster)
+        cert_to_idx[cert] = i
+
     clusters_by_order = defaultdict(list)
     for i, cluster in enumerate(distinct_clusters):
         clusters_by_order[len(cluster)].append((i, cluster))
@@ -578,31 +511,22 @@ def identify_subclusters(distinct_clusters, tet_graph):
         if cluster_order == 1:
             continue
         
-        # For each possible subcluster order
         for order in range(1, cluster_order):
-            candidates = clusters_by_order[order]
             subcluster_counts = defaultdict(int)
             
-            # Enumerate all connected subsets of size 'order'
             for subcluster_set in itertools.combinations(cluster, order):
                 subgraph = tet_graph.subgraph(subcluster_set)
                 
-                # Check if connected
                 if not nx.is_connected(subgraph):
                     continue
                 
-                # Find which distinct cluster type this matches
-                for cand_idx, cand_cluster in candidates:
-                    cand_subgraph = tet_graph.subgraph(cand_cluster)
-                    if nx.is_isomorphic(subgraph, cand_subgraph):
-                        subcluster_counts[cand_idx] += 1
-                        break
+                cert = _canonical_certificate(tet_graph, subcluster_set)
+                if cert in cert_to_idx:
+                    subcluster_counts[cert_to_idx[cert]] += 1
             
-            # Add to results
             for subcluster_idx, count in subcluster_counts.items():
                 subclusters_info[i].append((subcluster_idx, count))
         
-        # Sort by order
         subclusters_info[i].sort(key=lambda x: len(distinct_clusters[x[0]]))
     
     return subclusters_info

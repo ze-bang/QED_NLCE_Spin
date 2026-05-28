@@ -97,6 +97,10 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
                    help="Override # workers for the parallel ED step "
                         "(default: --num_cores). Threads-per-worker is "
                         "automatically set to num_cores // ed_parallel_workers.")
+    g.add_argument("--mpi", action="store_true",
+                   help="Distribute ED jobs across MPI ranks (requires mpi4py). "
+                        "Run under mpiexec. Steps 1/2/4 execute on rank 0; "
+                        "Step 3 is scattered with cost-aware scheduling.")
 
     # On-disk eigenvalue + subcluster cache. Content-addressed by
     # canonical cluster graph hash + Hamiltonian content hash, so

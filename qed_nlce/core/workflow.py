@@ -48,6 +48,7 @@ from .io import (
     get_cluster_files,
     setup_logging,
 )
+from .mpi_dispatch import mpi_available, scatter_ed_jobs, is_rank_zero, barrier
 from .pipeline import Pipeline
 
 
@@ -175,39 +176,56 @@ class NLCEWorkflow:
 
     def run(self) -> None:
         """Run all four steps of the NLCE pipeline (skipping per CLI flags)."""
-        log_file = os.path.join(self.base_dir, "nlce_workflow.log")
-        setup_logging(log_file)
+        use_mpi = bool(getattr(self.args, "mpi", False)) and mpi_available()
+        rank0 = is_rank_zero()
 
-        self._banner_top()
+        if rank0:
+            log_file = os.path.join(self.base_dir, "nlce_workflow.log")
+            setup_logging(log_file)
+            self._banner_top()
 
-        if not self.args.skip_cluster_gen:
-            self._step1_clusters()
-        else:
-            logging.info("Skipping cluster generation step.")
+        # Steps 1, 2, 2.5 run on rank 0 only; other ranks wait at barrier
+        if rank0:
+            if not self.args.skip_cluster_gen:
+                self._step1_clusters()
+            else:
+                logging.info("Skipping cluster generation step.")
+
+        if use_mpi:
+            barrier()
 
         clusters = self._discover_clusters()
 
-        if not self.args.skip_ham_prep:
-            self._step2_hamiltonians(clusters)
-        else:
-            logging.info("Skipping Hamiltonian preparation step.")
+        if rank0:
+            if not self.args.skip_ham_prep:
+                self._step2_hamiltonians(clusters)
+            else:
+                logging.info("Skipping Hamiltonian preparation step.")
 
-        if self.pipeline.needs_basis_precompute(self.args) and not getattr(
-            self.args, "skip_basis_precompute", False
-        ):
-            self._step2_5_basis_precompute(clusters)
+            if self.pipeline.needs_basis_precompute(self.args) and not getattr(
+                self.args, "skip_basis_precompute", False
+            ):
+                self._step2_5_basis_precompute(clusters)
+
+        if use_mpi:
+            barrier()
 
         if not self.args.skip_ed:
             self._step3_ed(clusters)
         else:
-            logging.info("Skipping ED step.")
+            if rank0:
+                logging.info("Skipping ED step.")
 
-        if not self.args.skip_nlc:
-            self._step4_summation()
-        else:
-            logging.info("Skipping NLCE summation step.")
+        if use_mpi:
+            barrier()
 
-        self._banner_bottom()
+        if rank0:
+            if not self.args.skip_nlc:
+                self._step4_summation()
+            else:
+                logging.info("Skipping NLCE summation step.")
+
+            self._banner_bottom()
 
     # ----------------------------------------------------------- helpers
 
@@ -342,11 +360,23 @@ class NLCEWorkflow:
         )
         logging.info("=" * 80)
 
-        # Build the per-cluster job list once. Each entry already has
-        # the per-cluster Pipeline-resolved EDOptions, the cache key
-        # extras, and the in-process / MPI gating result -- so the
-        # serial path and the parallel path execute the same set of
-        # operations.
+        # Sz auto-detection: probe the first cluster's Hamiltonian once
+        # and set a flag that make_ed_options can read.
+        if (
+            getattr(self.args, "auto_sz_detect", False)
+            and not getattr(self.args, "no_auto_sz_detect", False)
+            and not getattr(self.args, "auto_fixed_sz", False)
+            and not getattr(self.args, "auto_sz_decomposed", False)
+        ):
+            from qed_nlce.pipelines.auto_hybrid import _interall_conserves_sz
+            sample_ham = self._ham_subdir_for(clusters[0])
+            if os.path.isdir(sample_ham) and _interall_conserves_sz(sample_ham):
+                logging.info(
+                    "Sz auto-detect: model conserves S^z_total → enabling "
+                    "Sz-decomposed dispatch (all sectors, full Z)."
+                )
+                self.args.auto_sz_decomposed = True
+
         jobs: list[tuple[ClusterEntry, _EDPayload]] = []
         for cluster in clusters:
             ham_subdir = self._ham_subdir_for(cluster)
@@ -401,7 +431,11 @@ class NLCEWorkflow:
             ed_workers = int(getattr(self.args, "num_cores", 1) or 1)
         ed_workers = max(1, min(ed_workers, n_total))
 
-        if not parallel_enabled or ed_workers == 1:
+        use_mpi = bool(getattr(self.args, "mpi", False)) and mpi_available()
+
+        if use_mpi:
+            n_ok = self._run_ed_mpi(jobs)
+        elif not parallel_enabled or ed_workers == 1:
             n_ok = self._run_ed_serial(jobs)
         else:
             n_ok = self._run_ed_parallel(jobs, ed_workers)
@@ -478,6 +512,24 @@ class NLCEWorkflow:
         if pbar is not None:
             pbar.close()
         return n_ok
+
+    def _run_ed_mpi(self, jobs: list[tuple[ClusterEntry, _EDPayload]]) -> int:
+        """Distribute ED jobs across MPI ranks with cost-aware scheduling."""
+        payloads = [p for (_c, p) in jobs]
+
+        def _run_one(payload: _EDPayload) -> bool:
+            cache = EigenvalueCache(
+                payload.cache_dir or default_cache_dir(),
+                enabled=payload.cache_enabled,
+            )
+            return bool(run_ed_in_process(
+                payload.ham_subdir, payload.ed_subdir,
+                payload.num_sites, payload.options,
+                log_tag=payload.log_tag,
+                cache=cache, cache_key_extras=payload.cache_key_extras,
+            ))
+
+        return scatter_ed_jobs(payloads, _run_one)
 
     # ------------------------------------------------------------ step 4
 

@@ -39,6 +39,8 @@ import os
 from collections import defaultdict
 from fractions import Fraction
 
+import pynauty
+
 
 def parse_arguments():
     parser = argparse.ArgumentParser(
@@ -208,15 +210,51 @@ def get_site_graph(triangles, tri_nodes):
     return G
 
 
+def _site_graph_to_pynauty(triangles, tri_nodes):
+    """Convert the physical site graph of a triangle cluster to a pynauty.Graph.
+
+    Builds the site graph (nodes = lattice sites, edges = bonds within the
+    cluster's triangles) and maps it onto a pynauty.Graph with a canonical
+    internal node ordering (sorted site IDs → 0..n-1).
+    """
+    sites = set()
+    edges = set()
+    for tri_id in tri_nodes:
+        v0, v1, v2 = triangles[tri_id]
+        sites.update([v0, v1, v2])
+        edges.add((min(v0, v1), max(v0, v1)))
+        edges.add((min(v1, v2), max(v1, v2)))
+        edges.add((min(v0, v2), max(v0, v2)))
+
+    sorted_sites = sorted(sites)
+    idx_map = {s: i for i, s in enumerate(sorted_sites)}
+    n = len(sorted_sites)
+
+    pg = pynauty.Graph(n)
+    for u, v in edges:
+        pg.connect_vertex(idx_map[u], [idx_map[v]])
+    return pg
+
+
+def _canonical_certificate(triangles, tri_nodes):
+    """Compute a nauty canonical certificate for the physical site graph.
+
+    Two triangle clusters are topologically equivalent iff they have the
+    same canonical certificate. This replaces the O(n!) VF2 isomorphism
+    check with an O(1) dictionary lookup.
+    """
+    pg = _site_graph_to_pynauty(triangles, tri_nodes)
+    return pynauty.certificate(pg)
+
+
 def are_physically_isomorphic(triangles, nodes1, nodes2):
     """
     Check if two triangle clusters have isomorphic site graphs.
     
     This is the CORRECT isomorphism criterion for triangle-based NLCE.
+    Uses nauty canonical certificates for speed.
     """
-    G1 = get_site_graph(triangles, nodes1)
-    G2 = get_site_graph(triangles, nodes2)
-    return nx.is_isomorphic(G1, G2)
+    return _canonical_certificate(triangles, nodes1) == _canonical_certificate(triangles, nodes2)
 
 
 def graph_hash(site_graph):
@@ -266,12 +304,10 @@ def generate_triangle_clusters(meta_graph, triangles, max_order):
     for order in range(1, max_order + 1):
         print(f"Generating clusters of order {order} (triangles)...")
         
-        # Hash buckets for clustering by isomorphism
-        # Key = (n_sites, n_bonds, degree_sequence) of physical site graph
-        buckets = defaultdict(list)
+        # Certificate → (representative_nodes, raw_count)
+        cert_map = {}
         
         for anchor in nodes_sorted:
-            # Anchored expansion to avoid duplicates
             start = frozenset([anchor])
             frontier = set(n for n in meta_graph.neighbors(anchor) if n >= anchor)
             visited = set()
@@ -285,20 +321,13 @@ def generate_triangle_clusters(meta_graph, triangles, max_order):
                 visited.add(current)
                 
                 if len(current) == order:
-                    # Get physical site graph for hashing and isomorphism
-                    site_graph = get_site_graph(triangles, current)
-                    sig = graph_hash(site_graph)
+                    cert = _canonical_certificate(triangles, current)
                     
-                    # Check isomorphism within bucket using PHYSICAL SITE GRAPH
-                    placed = False
-                    for idx, (rep_nodes, cnt) in enumerate(buckets[sig]):
-                        if are_physically_isomorphic(triangles, current, rep_nodes):
-                            buckets[sig][idx] = (rep_nodes, cnt + 1)
-                            placed = True
-                            break
-                    
-                    if not placed:
-                        buckets[sig].append((current, 1))
+                    if cert in cert_map:
+                        rep, cnt = cert_map[cert]
+                        cert_map[cert] = (rep, cnt + 1)
+                    else:
+                        cert_map[cert] = (current, 1)
                     continue
                 
                 # Expand frontier
@@ -312,13 +341,10 @@ def generate_triangle_clusters(meta_graph, triangles, max_order):
         order_clusters = []
         order_mults = []
         
-        for sig_groups in buckets.values():
-            for rep_nodes, raw_count in sig_groups:
-                # Multiplicity L(c) = raw_count / (3 * N_triangles)
-                # Factor of 3 because each site belongs to 3 up-triangles
-                L = Fraction(raw_count, 3 * N_triangles)
-                order_clusters.append(rep_nodes)
-                order_mults.append(L)
+        for rep_nodes, raw_count in cert_map.values():
+            L = Fraction(raw_count, 3 * N_triangles)
+            order_clusters.append(rep_nodes)
+            order_mults.append(L)
         
         # Sort by multiplicity (descending), then by number of sites
         def cluster_sort_key(idx):
@@ -375,11 +401,18 @@ def get_cluster_bonds(triangles, cluster_nodes):
 def identify_subclusters(distinct_clusters, multiplicities, orders, triangles, meta_graph):
     """
     Identify subclusters for each cluster and compute embedding counts.
-    Uses physical site graph isomorphism for matching.
+    Uses nauty canonical certificates for O(1) matching.
     """
     clusters_by_order = defaultdict(list)
     for i, cluster in enumerate(distinct_clusters):
         clusters_by_order[orders[i]].append((i, cluster))
+    
+    # Pre-compute certificate → cluster index for all representatives
+    cert_to_idx = {}
+    for i, cluster in enumerate(distinct_clusters):
+        if orders[i] >= 1:
+            cert = _canonical_certificate(triangles, cluster)
+            cert_to_idx[cert] = i
     
     subclusters_info = {}
     
@@ -390,16 +423,12 @@ def identify_subclusters(distinct_clusters, multiplicities, orders, triangles, m
         if cluster_order == 0:
             continue
         
-        # Every cluster of order >= 1 embeds the single-site (order-0) cluster
-        # once per physical site.  Index 0 = the order-0 cluster.
         n_sites = len(get_cluster_sites(triangles, cluster_nodes))
         subclusters_info[i].append((0, n_sites))
         
         for sub_order in range(1, cluster_order):
-            candidates = clusters_by_order[sub_order]
             subcluster_counts = defaultdict(int)
             
-            # Enumerate all connected sub_order subsets of triangles
             for subset in itertools.combinations(cluster_nodes, sub_order):
                 subset = frozenset(subset)
                 subset_subgraph = meta_graph.subgraph(subset)
@@ -407,11 +436,9 @@ def identify_subclusters(distinct_clusters, multiplicities, orders, triangles, m
                 if not nx.is_connected(subset_subgraph):
                     continue
                 
-                # Find matching candidate using PHYSICAL SITE GRAPH ISOMORPHISM
-                for cand_idx, cand_nodes in candidates:
-                    if are_physically_isomorphic(triangles, subset, cand_nodes):
-                        subcluster_counts[cand_idx] += 1
-                        break
+                cert = _canonical_certificate(triangles, subset)
+                if cert in cert_to_idx:
+                    subcluster_counts[cert_to_idx[cert]] += 1
             
             for sub_idx, count in subcluster_counts.items():
                 subclusters_info[i].append((sub_idx, count))

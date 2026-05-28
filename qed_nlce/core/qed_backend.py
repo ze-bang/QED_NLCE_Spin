@@ -43,7 +43,8 @@ Capability matrix (Phase 7+ canonical 5-axis dispatcher)::
     mTPQ                        thermal(mTPQ)
     mTPQ_CUDA / mTPQ_GPU        thermal(mTPQ)   device='gpu'
     cTPQ[_GPU]                  thermal(cTPQ)   [device='gpu']
-    *_FIXED_SZ                  + sz_min=sz_max=N//2 (Sz=0 sector)
+    *_FIXED_SZ                  + sz_min=sz_max=N//2 (Sz=0 only)
+    *_SZ_DECOMPOSED             + use_sz_if_conserved (all sectors)
     streaming_symmetry          + use_symmetry_if_available=True
     ==========================  ==============  =====================
 
@@ -78,19 +79,24 @@ def qed_available() -> bool:
 # Method names that have a clean in-process Python equivalent. Anything
 # in this set is routed through ``qed.solve`` (ground-state methods) or
 # ``qed.thermal`` (FTLM / LTLM / KPM_DOS / mTPQ / cTPQ). The suffix
-# stripper in ``_resolve_method`` handles the ``_GPU`` / ``_FIXED_SZ``
-# decorators below.
+# stripper in ``_resolve_method`` handles the ``_GPU`` / ``_FIXED_SZ`` /
+# ``_SZ_DECOMPOSED`` decorators below.
 _INPROC_METHODS = {
     "FULL", "FULL_GPU", "FULL_FIXED_SZ", "FULL_GPU_FIXED_SZ",
+    "FULL_SZ_DECOMPOSED", "FULL_GPU_SZ_DECOMPOSED",
     "LANCZOS", "LANCZOS_GPU",
     "LANCZOS_FIXED_SZ", "LANCZOS_GPU_FIXED_SZ",
+    "LANCZOS_SZ_DECOMPOSED", "LANCZOS_GPU_SZ_DECOMPOSED",
     "BLOCK_LANCZOS", "BLOCK_LANCZOS_GPU",
     "BLOCK_LANCZOS_FIXED_SZ", "BLOCK_LANCZOS_GPU_FIXED_SZ",
+    "BLOCK_LANCZOS_SZ_DECOMPOSED", "BLOCK_LANCZOS_GPU_SZ_DECOMPOSED",
     "KRYLOV_SCHUR", "KRYLOV_SCHUR_GPU",
     "KRYLOV_SCHUR_FIXED_SZ", "KRYLOV_SCHUR_GPU_FIXED_SZ",
+    "KRYLOV_SCHUR_SZ_DECOMPOSED", "KRYLOV_SCHUR_GPU_SZ_DECOMPOSED",
     "FTLM", "FTLM_GPU", "FTLM_FIXED_SZ", "FTLM_GPU_FIXED_SZ",
-    "LTLM", "LTLM_FIXED_SZ",
-    "KPM_DOS", "KPM_DOS_FIXED_SZ",
+    "FTLM_SZ_DECOMPOSED", "FTLM_GPU_SZ_DECOMPOSED",
+    "LTLM", "LTLM_FIXED_SZ", "LTLM_SZ_DECOMPOSED",
+    "KPM_DOS", "KPM_DOS_FIXED_SZ", "KPM_DOS_SZ_DECOMPOSED",
     "mTPQ", "mTPQ_CUDA", "mTPQ_GPU", "cTPQ", "cTPQ_GPU",
 }
 
@@ -122,11 +128,19 @@ def can_run_in_process(method: str) -> bool:
 
 def _resolve_method(method_name: str):
     """Map an NLCE method string to ``(DiagonalizationMethod, use_gpu,
-    use_fixed_sz)``.
+    use_fixed_sz, use_sz_decomposed)``.
 
-    Strips the optional ``_GPU`` / ``_CUDA`` and ``_FIXED_SZ``
-    suffixes (orthogonal axes of the canonical 5-axis dispatcher) and
-    looks the base name up on :class:`qed.DiagonalizationMethod`.
+    Strips the optional ``_GPU`` / ``_CUDA``, ``_FIXED_SZ``, and
+    ``_SZ_DECOMPOSED`` suffixes (orthogonal axes of the canonical
+    5-axis dispatcher) and looks the base name up on
+    :class:`qed.DiagonalizationMethod`.
+
+    ``_FIXED_SZ``: restrict to the single Sz=0 sector (n_up=N//2).
+    ``_SZ_DECOMPOSED``: iterate ALL Sz sectors individually and
+    recombine — gives the correct full partition function while still
+    benefiting from block-diagonal structure (each block has dimension
+    C(N,k) instead of 2^N).
+
     Raises :class:`ValueError` with a helpful message when the base
     name is not bound (e.g. legacy methods that did not survive the
     May-2026 surface collapse).
@@ -134,6 +148,15 @@ def _resolve_method(method_name: str):
     m = method_name.upper()
     use_gpu = False
     use_fixed_sz = False
+    use_sz_decomposed = False
+
+    # Strip Sz suffixes first (they come last in the canonical name).
+    if m.endswith("_SZ_DECOMPOSED"):
+        use_sz_decomposed = True
+        m = m[: -len("_SZ_DECOMPOSED")]
+    elif m.endswith("_FIXED_SZ"):
+        use_fixed_sz = True
+        m = m[: -len("_FIXED_SZ")]
 
     # Strip _GPU / _CUDA suffix and remember it.
     if m.endswith("_GPU") or m == "MTPQ_CUDA":
@@ -151,10 +174,6 @@ def _resolve_method(method_name: str):
     else:
         base = m
 
-    if base.endswith("_FIXED_SZ"):
-        use_fixed_sz = True
-        base = base[: -len("_FIXED_SZ")]
-
     try:
         method_enum = getattr(qed.DiagonalizationMethod, base)
     except AttributeError as exc:
@@ -164,7 +183,7 @@ def _resolve_method(method_name: str):
             f"Available methods: "
             f"{sorted(qed.DiagonalizationMethod.__members__.keys())}"
         ) from exc
-    return method_enum, use_gpu, use_fixed_sz
+    return method_enum, use_gpu, use_fixed_sz, use_sz_decomposed
 
 
 def _parse_kpm_extra_flags(
@@ -253,6 +272,8 @@ def _dispatch_thermal(
     method_enum: "qed.DiagonalizationMethod",
     device: str,
     n_up_fixed: Optional[int],
+    *,
+    sz_decomposed: bool = False,
 ) -> None:
     """Route a thermal lane through :func:`qed.thermal` (directory
     form). The C++ orchestrator reads ``Trans.dat`` /
@@ -273,9 +294,16 @@ def _dispatch_thermal(
         use_symmetry_if_available=bool(options.streaming_symmetry),
     )
 
-    if n_up_fixed is not None:
-        # Sz=0 sector: single-block trace (matches the legacy semantics
-        # of ``params.use_fixed_sz=True`` + default ``n_up=N//2``).
+    if sz_decomposed:
+        # Full Sz decomposition: iterate ALL sectors [0, N] and let
+        # qed.thermal recombine via _combine_sector_thermodynamics.
+        # Correct for finite-T NLCE (full partition function).
+        # Benefit: each block is C(N,k) instead of 2^N.
+        kwargs["use_sz_if_conserved"] = True
+        # Do NOT set sz_min/sz_max → defaults to full [0, N] window.
+    elif n_up_fixed is not None:
+        # Legacy single-sector (Sz=0 only). Approximate — valid at
+        # low T where Z is dominated by the Sz=0 block.
         kwargs["sz_min"] = int(n_up_fixed)
         kwargs["sz_max"] = int(n_up_fixed)
         kwargs["use_sz_if_conserved"] = True
@@ -308,7 +336,31 @@ def _dispatch_thermal(
             # kernel, Lorentz lambda, quadrature nodes).
             kwargs["extra_params"] = kpm_extra
 
-    qed.thermal(ham_subdir, **kwargs)
+    result = qed.thermal(ham_subdir, **kwargs)
+
+    # When Sz-decomposed, qed.thermal iterates sectors in Python and
+    # recombines Z, but the C++ layer only writes per-sector data to the
+    # HDF5. We must persist the recombined thermodynamics so the NLCE
+    # summation step can read them from the standard location.
+    if sz_decomposed and result is not None:
+        import h5py
+        import numpy as np
+        h5_path = os.path.join(out_subdir, "ed_results.h5")
+        with h5py.File(h5_path, "a") as f:
+            grp = f.require_group("thermodynamics")
+            for key in ("temperatures", "energy", "specific_heat",
+                        "entropy", "free_energy"):
+                arr = getattr(result, key, None)
+                if arr is None:
+                    continue
+                data = np.asarray(arr, dtype=np.float64)
+                if key in grp:
+                    del grp[key]
+                grp.create_dataset(key, data=data)
+            grp.attrs["sz_decomposed"] = True
+            grp.attrs["used_sz_decomposition"] = bool(
+                getattr(result, "used_sz_decomposition", True)
+            )
 
 
 def _dispatch_ground_state(
@@ -390,6 +442,82 @@ def _dispatch_ground_state(
     qed.solve(op, **kwargs)
 
 
+def _dispatch_full_sz_decomposed(
+    ham_subdir: str,
+    out_subdir: str,
+    num_sites: int,
+    options: EDOptions,
+    method_enum: "qed.DiagonalizationMethod",
+    device: str,
+) -> None:
+    """Full diagonalization of every Sz sector, saving the combined spectrum.
+
+    For NLCE thermodynamics with Sz conservation: diagonalizes each Sz
+    block individually (dimension C(N,k) instead of 2^N), concatenates
+    all eigenvalues, and saves them to ``ed_results.h5:/eigendata/``.
+    The summation step then computes the correct full partition function
+    from the complete spectrum.
+    """
+    import h5py
+
+    N = int(num_sites)
+    op = qed.Operator(num_sites=N, spin=float(options.spin_length))
+    trans = os.path.join(ham_subdir, "Trans.dat")
+    inter = os.path.join(ham_subdir, "InterAll.dat")
+    if os.path.exists(trans):
+        op.load_trans(trans)
+    if os.path.exists(inter):
+        op.load_inter_all(inter)
+
+    all_eigenvalues: list = []
+    for n_up in range(N + 1):
+        sector_dim = math.comb(N, n_up)
+        if sector_dim == 0:
+            continue
+        result = qed.solve(
+            op,
+            num_eigenvalues=sector_dim,
+            solver=method_enum,
+            device=device,
+            sz=n_up,
+            verbose=False,
+            plan=False,
+            auto_tune=False,
+            auto_sz=False,
+        )
+        eigs = result.eigenvalues
+        if eigs is not None and len(eigs) > 0:
+            all_eigenvalues.extend(
+                eigs.tolist() if hasattr(eigs, 'tolist') else list(eigs)
+            )
+
+    if not all_eigenvalues:
+        raise RuntimeError(
+            f"FULL_SZ_DECOMPOSED: no eigenvalues obtained from any "
+            f"Sz sector (N={N})."
+        )
+
+    all_eigenvalues.sort()
+    import numpy as np
+    eig_array = np.array(all_eigenvalues, dtype=np.float64)
+
+    h5_path = os.path.join(out_subdir, "ed_results.h5")
+    with h5py.File(h5_path, "w") as f:
+        grp = f.create_group("eigendata")
+        grp.create_dataset("eigenvalues", data=eig_array)
+        grp.attrs["num_eigenvalues"] = len(eig_array)
+        grp.attrs["hilbert_dim"] = 1 << N
+        grp.attrs["num_sites"] = N
+        grp.attrs["sz_decomposed"] = True
+        grp.attrs["num_sectors"] = N + 1
+
+    logging.info(
+        "FULL_SZ_DECOMPOSED: N=%d, %d eigenvalues from %d sectors, "
+        "E_gs=%.6f",
+        N, len(eig_array), N + 1, eig_array[0],
+    )
+
+
 def run_ed_in_process(
     ham_subdir: str,
     output_dir: str,
@@ -431,7 +559,9 @@ def run_ed_in_process(
             cache_key = None
 
     try:
-        method_enum, use_gpu, use_fixed_sz = _resolve_method(options.method)
+        method_enum, use_gpu, use_fixed_sz, use_sz_decomposed = (
+            _resolve_method(options.method)
+        )
     except ValueError as exc:
         logging.error("[%s] method resolution failed: %s", log_tag, exc)
         return False
@@ -449,9 +579,14 @@ def run_ed_in_process(
     os.makedirs(out_subdir, exist_ok=True)
 
     device = "gpu" if use_gpu else "cpu"
-    # ``use_fixed_sz`` is the legacy "single-sector trace" axis. The
-    # historical convention (see ``QED_NLCE/README.md``) is to pin the
-    # Sz=0 block, which for spin-1/2 means ``n_up = N // 2``.
+
+    # Sz-sector routing:
+    # - ``use_fixed_sz``: legacy single-sector (Sz=0 only, n_up=N//2).
+    #   Approximation valid at low T where Sz=0 dominates Z.
+    # - ``use_sz_decomposed``: iterate ALL Sz sectors, recombine Z.
+    #   Physically exact for finite-T NLCE. Each sector has dimension
+    #   C(N,k) instead of 2^N — gives memory/compute savings while
+    #   keeping the full partition function correct.
     n_up_fixed: Optional[int] = (
         int(num_sites) // 2 if use_fixed_sz else None
     )
@@ -459,11 +594,24 @@ def run_ed_in_process(
     method_base = method_enum.name  # e.g. "FTLM", "FULL", ...
     is_thermal = method_base in _THERMAL_METHODS
 
+    # When Sz-decomposed + thermal method (KPM_DOS, FTLM, etc.), route
+    # through qed.thermal which handles sector iteration + Z-recombination.
+    # For FULL_SZ_DECOMPOSED, use the dedicated per-sector solve path
+    # that collects all eigenvalues (NLCE summation computes thermo from them).
+    if use_sz_decomposed and method_base in _THERMAL_METHODS:
+        is_thermal = True
+
     try:
-        if is_thermal:
+        if use_sz_decomposed and method_base not in _THERMAL_METHODS:
+            _dispatch_full_sz_decomposed(
+                ham_subdir, out_subdir, int(num_sites), options,
+                method_enum, device,
+            )
+        elif is_thermal:
             _dispatch_thermal(
                 ham_subdir, out_subdir, int(num_sites), options,
                 method_enum, device, n_up_fixed,
+                sz_decomposed=use_sz_decomposed,
             )
         else:
             _dispatch_ground_state(

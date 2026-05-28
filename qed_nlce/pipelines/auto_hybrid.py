@@ -54,10 +54,88 @@ cluster (useful for benchmarking the variance scaling).
 from __future__ import annotations
 
 import argparse
+import logging
 import math
+import os
+import re
 
 from ..core import EDOptions, register_pipeline
 from .ftlm import FTLMPipeline
+
+
+def _interall_conserves_sz(ham_dir: str) -> bool:
+    """Inspect InterAll.dat to determine if the Hamiltonian conserves S^z_total.
+
+    A spin-1/2 two-body term conserves Sz iff it is diagonal in the
+    computational basis (SzSz) or is a flip-pair (S+S- or S-S+). In the
+    InterAll.dat format, the 4 spin indices (s1, s2, s3, s4) encode the
+    matrix element <s1 s3 | H | s2 s4> for each site pair. The Sz-conserving
+    terms have s1==s2 AND s3==s4 (diagonal/SzSz), or s1!=s2 AND s3!=s4 with
+    complementary flips (S+S-/S-S+).
+
+    Returns True if all terms conserve Sz, False otherwise. Returns True
+    if the file cannot be parsed (conservative default that preserves
+    existing behaviour).
+    """
+    inter_file = os.path.join(ham_dir, "InterAll.dat")
+    if not os.path.isfile(inter_file):
+        return True  # no interactions → trivially conserves Sz
+
+    try:
+        with open(inter_file, "r") as f:
+            lines = f.readlines()
+    except OSError:
+        return True
+
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or line.startswith("="):
+            continue
+        # HPhi InterAll format (10 fields):
+        #   site_i σ1 site_j σ2 site_k σ3 site_l σ4 Re Im
+        # Term: c^+_{i,σ1} c_{j,σ2} c^+_{k,σ3} c_{l,σ4}
+        # Sz conservation: (σ2 - σ1) + (σ4 - σ3) == 0
+        parts = line.split()
+        if len(parts) < 10:
+            continue
+        try:
+            sigma1 = int(parts[1])
+            sigma2 = int(parts[3])
+            sigma3 = int(parts[5])
+            sigma4 = int(parts[7])
+        except (ValueError, IndexError):
+            continue
+
+        if (sigma2 - sigma1) + (sigma4 - sigma3) != 0:
+            return False
+
+    # Also check Trans.dat for single-site terms that flip spin.
+    # HPhi Trans.dat format (6 fields):
+    #   site_i σ1 site_j σ2 Re Im
+    # Term: c^+_{i,σ1} c_{j,σ2}
+    # Sz conservation: σ1 == σ2
+    trans_file = os.path.join(ham_dir, "Trans.dat")
+    if os.path.isfile(trans_file):
+        try:
+            with open(trans_file, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or line.startswith("="):
+                        continue
+                    parts = line.split()
+                    if len(parts) < 6:
+                        continue
+                    try:
+                        sigma1 = int(parts[1])
+                        sigma2 = int(parts[3])
+                    except (ValueError, IndexError):
+                        continue
+                    if sigma1 != sigma2:
+                        return False
+        except OSError:
+            pass
+
+    return True
 
 
 @register_pipeline
@@ -139,12 +217,17 @@ class AutoHybridPipeline(FTLMPipeline):
 
         # Symmetry axes (orthogonal -- can be combined).
         g.add_argument(
+            "--auto_sz_decomposed", action="store_true",
+            help="Exploit Sz conservation by iterating all Sz sectors "
+                 "individually (each has dim C(N,k) instead of 2^N) and "
+                 "recombining the full partition function. Correct for "
+                 "finite-T NLCE. Auto-enabled by --auto_sz_detect.",
+        )
+        g.add_argument(
             "--auto_fixed_sz", action="store_true",
-            help="Assert the Hamiltonian conserves S^z_total. Routes "
-                 "every cluster through the fixed-Sz block (~5x smaller "
-                 "Hilbert space at N=20). Use ONLY if your model has no "
-                 "transverse field (h_x, h_y) and no Sx/Sy single-site "
-                 "or anisotropic xy terms.",
+            help="(Legacy) Restrict to single Sz=0 sector only. "
+                 "Approximate at finite T — use --auto_sz_decomposed "
+                 "for correct thermodynamics.",
         )
         g.add_argument(
             "--auto_streaming_symmetry", action="store_true",
@@ -152,18 +235,32 @@ class AutoHybridPipeline(FTLMPipeline):
                  "cluster (orbit-basis sector decomposition). Cached "
                  "per cluster under <ham_dir>/basis_cache/.",
         )
+        g.add_argument(
+            "--auto_sz_detect", action="store_true", default=True,
+            help="Auto-detect Sz conservation from InterAll.dat and "
+                 "route through fixed-Sz block if the model conserves "
+                 "S^z_total (default: on). Disable with --no_auto_sz_detect.",
+        )
+        g.add_argument(
+            "--no_auto_sz_detect", action="store_true",
+            help="Disable Sz auto-detection (always use full Hilbert space).",
+        )
 
     # ------------------------------------------------------------------
     # Per-cluster option construction
     # ------------------------------------------------------------------
 
-    def _maybe_fixed_sz_suffix(self, args: argparse.Namespace, base: str) -> str:
-        """Append ``_FIXED_SZ`` to the method name if requested.
+    def _maybe_sz_suffix(self, args: argparse.Namespace, base: str) -> str:
+        """Append ``_SZ_DECOMPOSED`` or ``_FIXED_SZ`` to the method name.
 
-        The qed backend's :func:`_resolve_method` strips this suffix and
-        sets ``params.use_fixed_sz = True``, so this is the canonical
-        plumbing path for an orthogonal U(1)-Sz axis.
+        - ``_SZ_DECOMPOSED`` (default for auto-detected Sz conservation):
+          iterates all Sz sectors and recombines Z — physically exact for
+          finite-T NLCE while benefiting from block-diagonal structure.
+        - ``_FIXED_SZ`` (legacy, explicit opt-in only): restricts to the
+          single Sz=0 sector. Approximate at finite T.
         """
+        if getattr(args, "auto_sz_decomposed", False):
+            return base + "_SZ_DECOMPOSED"
         if getattr(args, "auto_fixed_sz", False):
             return base + "_FIXED_SZ"
         return base
@@ -179,7 +276,7 @@ class AutoHybridPipeline(FTLMPipeline):
         # ---- Below the crossover: FULL ED (exact, noise-free) ----
         if hilbert_dim <= full_ceiling:
             return EDOptions(
-                method=self._maybe_fixed_sz_suffix(args, "FULL"),
+                method=self._maybe_sz_suffix(args, "FULL"),
                 eigenvalues="FULL",
                 thermo=True,  # NLC_sum_ftlm reads /thermodynamics/{...}
                 temp_min=args.temp_min,
@@ -197,8 +294,22 @@ class AutoHybridPipeline(FTLMPipeline):
                 f"--kpm_kernel={getattr(args, 'auto_kpm_kernel', 'jackson')}",
                 f"--kpm_seed={getattr(args, 'auto_kpm_seed', 0)}",
             ]
+            # Adaptive R: for large clusters (dim >> 2^14), the stochastic
+            # trace variance 1/sqrt(R*D) is already small, so we can reduce
+            # R. For small clusters just above the full-ED ceiling, use
+            # more vectors for tighter accuracy. Target: per-cluster relative
+            # error < 1e-3 on C(T) to satisfy NLCE Mobius budget (kappa~80-150).
+            base_R = getattr(args, "auto_kpm_random_vectors", 32)
+            if hilbert_dim >= (1 << 18):
+                # Very large cluster: 1/sqrt(R*D) tiny even at R=16
+                adaptive_R = max(16, base_R // 2)
+            elif hilbert_dim >= (1 << 16):
+                adaptive_R = max(20, int(base_R * 0.75))
+            else:
+                adaptive_R = base_R
+
             return EDOptions(
-                method=self._maybe_fixed_sz_suffix(args, base),
+                method=self._maybe_sz_suffix(args, base),
                 eigenvalues=None,
                 thermo=True,
                 temp_min=args.temp_min,
@@ -207,9 +318,7 @@ class AutoHybridPipeline(FTLMPipeline):
                 symmetrized=symmetrized,
                 use_symm=False,
                 streaming_symmetry=streaming,
-                # Tunneled into kpm_num_random_vectors / kpm_num_moments
-                # by qed_backend.run_ed_in_process when method is KPM_DOS:
-                samples=getattr(args, "auto_kpm_random_vectors", 20),
+                samples=adaptive_R,
                 krylov_dim=getattr(args, "auto_kpm_moments", 2048),
                 extra_flags=extra_flags,
             )
@@ -230,7 +339,7 @@ class AutoHybridPipeline(FTLMPipeline):
 
         ftlm_base = "FTLM_GPU" if getattr(args, "use_gpu", False) else "FTLM"
         return EDOptions(
-            method=self._maybe_fixed_sz_suffix(args, ftlm_base),
+            method=self._maybe_sz_suffix(args, ftlm_base),
             eigenvalues=None,
             thermo=True,
             temp_min=args.temp_min,
