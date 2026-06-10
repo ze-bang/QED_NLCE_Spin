@@ -63,6 +63,138 @@ def run_pipeline(name: str, base_dir: str, args) -> dict:
     }
 
 
+def _parse_peak_rss_mb(log_path: str) -> Optional[float]:
+    """Parse ``Maximum resident set size`` (KiB) from a GNU ``/usr/bin/time
+    -v`` log and convert to MiB. Returns ``None`` if the line is absent
+    (e.g. ``/usr/bin/time`` unavailable)."""
+    try:
+        with open(log_path, "r", errors="replace") as f:
+            for line in f:
+                if "Maximum resident set size" in line:
+                    kb = float(line.rsplit(":", 1)[1].strip())
+                    return kb / 1024.0
+    except Exception:
+        pass
+    return None
+
+
+def run_full_ed_method(method: str, base_dir: str, args) -> dict:
+    """Run the ``full_ed`` pipeline with an explicit ``--method`` and
+    capture wall time + peak RSS (via ``/usr/bin/time -v`` when present)."""
+    if os.path.isdir(base_dir):
+        shutil.rmtree(base_dir)
+    os.makedirs(base_dir, exist_ok=True)
+
+    cmd = [
+        sys.executable, "-m", "qed_nlce",
+        "--geometry", args.geometry,
+        "--pipeline", "full_ed",
+        "--max_order", str(args.max_order),
+        "--base_dir", base_dir,
+        "--temp_min", str(args.temp_min),
+        "--temp_max", str(args.temp_max),
+        "--temp_bins", str(args.temp_bins),
+        "--thermo",
+        "--method", method,
+    ]
+    # --J1 is a triangular-geometry knob; pyrochlore rejects it.
+    if str(args.geometry).startswith("triangular"):
+        cmd += ["--J1", str(args.J1)]
+    use_time = os.path.exists("/usr/bin/time")
+    wrapped = (["/usr/bin/time", "-v"] + cmd) if use_time else cmd
+
+    log_path = os.path.join(base_dir, "pipeline.log")
+    t0 = time.perf_counter()
+    with open(log_path, "w") as logf:
+        proc = subprocess.run(wrapped, stdout=logf, stderr=subprocess.STDOUT)
+    dt = time.perf_counter() - t0
+
+    return {
+        "method": method,
+        "wall_seconds": dt,
+        "peak_rss_mb": _parse_peak_rss_mb(log_path),
+        "exit_code": proc.returncode,
+        "log": log_path,
+        "base_dir": base_dir,
+        "nlc_dir": _find_nlc_results_dir(base_dir),
+    }
+
+
+def run_symmetry_ab(args) -> int:
+    """A/B the dense vs symmetry-decomposed full_ed path on the same model:
+    wall time, peak memory, and per-observable thermodynamic agreement
+    (they should match to eigenvalue precision)."""
+    os.makedirs(args.report_dir, exist_ok=True)
+    print(f"[bench-ab] dense (FULL) vs symmetrized (FULL_SYMMETRIZED) "
+          f"full_ed: geometry={args.geometry} max_order={args.max_order} "
+          f"J1={args.J1}")
+
+    variants = {
+        "FULL": os.path.join(args.report_dir, "ab_dense"),
+        "FULL_SYMMETRIZED": os.path.join(args.report_dir, "ab_symmetrized"),
+    }
+    runs: dict[str, dict] = {}
+    for method, base in variants.items():
+        print(f"[bench-ab] running full_ed --method={method} ...", flush=True)
+        r = run_full_ed_method(method, base, args)
+        runs[method] = r
+        ok = r["exit_code"] == 0 and r["nlc_dir"]
+        rss = f"{r['peak_rss_mb']:.1f} MB" if r["peak_rss_mb"] else "n/a"
+        print(f"  -> {'OK' if ok else 'FAILED'}  "
+              f"{r['wall_seconds']:.2f} s  peak={rss}")
+
+    dense = runs["FULL"]
+    sym = runs["FULL_SYMMETRIZED"]
+    if dense["exit_code"] != 0 or sym["exit_code"] != 0 \
+            or not dense["nlc_dir"] or not sym["nlc_dir"]:
+        print("[bench-ab] FATAL: one of the runs failed", file=sys.stderr)
+        return 2
+
+    obs_files = {
+        "energy": "nlc_energy.txt",
+        "specific_heat": "nlc_specific_heat.txt",
+        "entropy": "nlc_entropy.txt",
+    }
+    accuracy: dict = {}
+    print("\n[bench-ab] thermodynamic agreement (symmetrized vs dense):")
+    print(f"  {'observable':<14} {'max_abs':>12} {'mean_rel':>12}")
+    for obs, fname in obs_files.items():
+        cd = _load_curve(dense["nlc_dir"], fname)
+        cs = _load_curve(sym["nlc_dir"], fname)
+        if cd is None or cs is None:
+            continue
+        m = compare_curves(cd[0], cd[1], cs[0], cs[1])
+        accuracy[obs] = m
+        print(f"  {obs:<14} {m['max_abs']:>12.2e} {m['mean_rel']:>12.2e}")
+
+    speedup = (dense["wall_seconds"] / sym["wall_seconds"]
+               if sym["wall_seconds"] > 0 else None)
+    mem_ratio = (dense["peak_rss_mb"] / sym["peak_rss_mb"]
+                 if (dense["peak_rss_mb"] and sym["peak_rss_mb"]) else None)
+    print("\n[bench-ab] summary:")
+    print(f"  wall:  dense={dense['wall_seconds']:.2f}s  "
+          f"sym={sym['wall_seconds']:.2f}s  "
+          f"speedup={speedup:.2f}x" if speedup else "  wall: n/a")
+    if mem_ratio:
+        print(f"  peak:  dense={dense['peak_rss_mb']:.1f}MB  "
+              f"sym={sym['peak_rss_mb']:.1f}MB  ratio={mem_ratio:.2f}x")
+
+    report = {
+        "mode": "symmetry_ab",
+        "config": vars(args),
+        "runs": {k: {kk: vv for kk, vv in v.items() if kk != "base_dir"}
+                 for k, v in runs.items()},
+        "accuracy_sym_vs_dense": accuracy,
+        "speedup": speedup,
+        "mem_ratio": mem_ratio,
+    }
+    out_json = os.path.join(args.report_dir, "symmetry_ab_report.json")
+    with open(out_json, "w") as f:
+        json.dump(report, f, indent=2)
+    print(f"\n[bench-ab] wrote {out_json}")
+    return 0
+
+
 def _find_nlc_results_dir(base_dir: str) -> Optional[str]:
     for entry in sorted(os.listdir(base_dir)):
         full = os.path.join(base_dir, entry)
@@ -126,7 +258,16 @@ def main() -> int:
     p.add_argument("--temp_bins", type=int, default=80)
     p.add_argument("--ftlm_samples", type=int, default=80)
     p.add_argument("--ftlm_krylov", type=int, default=200)
+    p.add_argument("--symmetry_ab", action="store_true",
+                   help="A/B the dense full_ed (--method FULL) against the "
+                        "symmetry-decomposed full_ed (--method "
+                        "FULL_SYMMETRIZED): wall time, peak RSS, and "
+                        "thermodynamic agreement. Skips the FTLM/Lanczos "
+                        "accuracy comparison.")
     args = p.parse_args()
+
+    if args.symmetry_ab:
+        return run_symmetry_ab(args)
 
     os.makedirs(args.report_dir, exist_ok=True)
     runs: dict[str, dict] = {}

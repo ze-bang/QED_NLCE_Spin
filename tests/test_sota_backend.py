@@ -39,6 +39,70 @@ def test_can_run_in_process_rejects_mpi_only_methods():
     assert not qed_backend.can_run_in_process("BOGUS_METHOD_NAME")
 
 
+def test_can_run_in_process_supports_full_symmetrized():
+    from qed_nlce.core import qed_backend
+    assert qed_backend.can_run_in_process("FULL_SYMMETRIZED")
+    assert qed_backend.can_run_in_process("FULL_SYMMETRIZED_GPU")
+
+
+# ---------------------------------------------------------------------------
+# FULL_SYMMETRIZED correctness: complete spectrum == legacy dense FULL
+# ---------------------------------------------------------------------------
+
+
+def _write_heisenberg_ring(directory, n):
+    """Write Trans.dat / InterAll.dat for an n-site periodic Heisenberg
+    ring into ``directory`` (the on-disk form qed_backend loads)."""
+    import qed
+    from qed.input import HamiltonianBuilder
+    from qed.workflow import _write_operator_directory
+
+    b = HamiltonianBuilder(n)
+    bonds = [(i, (i + 1) % n) for i in range(n)]
+    b.heisenberg(bonds, 1.0)
+    op = b.to_operator()
+    _write_operator_directory(op, str(directory))
+    return op
+
+
+def _read_eigendata(out_subdir):
+    import h5py
+    import numpy as np
+    with h5py.File(str(out_subdir / "ed_results.h5"), "r") as f:
+        return np.sort(np.asarray(f["eigendata"]["eigenvalues"][...],
+                                  dtype=float))
+
+
+def test_full_symmetrized_matches_dense_full(tmp_path):
+    """The complete spectrum from FULL_SYMMETRIZED (decomposed by all
+    Sz x spatial symmetries) must equal the legacy dense FULL spectrum
+    as a multiset."""
+    import numpy as np
+    from qed_nlce.core import qed_backend
+    from qed_nlce.core.ed_runner import EDOptions
+
+    n = 6
+    ham = tmp_path / "ham"
+    ham.mkdir()
+    _write_heisenberg_ring(ham, n)
+
+    def _run(method):
+        out_root = tmp_path / method
+        out_root.mkdir()
+        opts = EDOptions(method=method, eigenvalues="FULL")
+        ok = qed_backend.run_ed_in_process(
+            str(ham), str(out_root), n, opts, log_tag=method)
+        assert ok, f"{method} dispatch failed"
+        return _read_eigendata(out_root / "output")
+
+    sym = _run("FULL_SYMMETRIZED")
+    dense = _run("FULL_SZ_DECOMPOSED")
+
+    assert len(sym) == (1 << n), f"expected {1 << n} eigs, got {len(sym)}"
+    assert len(sym) == len(dense)
+    assert float(np.max(np.abs(sym - dense))) < 1e-9
+
+
 def test_qed_available_returns_true():
     """qed is a required dep -- must always be importable."""
     from qed_nlce.core import qed_backend

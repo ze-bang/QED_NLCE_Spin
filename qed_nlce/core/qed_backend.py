@@ -84,6 +84,7 @@ def qed_available() -> bool:
 _INPROC_METHODS = {
     "FULL", "FULL_GPU", "FULL_FIXED_SZ", "FULL_GPU_FIXED_SZ",
     "FULL_SZ_DECOMPOSED", "FULL_GPU_SZ_DECOMPOSED",
+    "FULL_SYMMETRIZED", "FULL_SYMMETRIZED_GPU",
     "LANCZOS", "LANCZOS_GPU",
     "LANCZOS_FIXED_SZ", "LANCZOS_GPU_FIXED_SZ",
     "LANCZOS_SZ_DECOMPOSED", "LANCZOS_GPU_SZ_DECOMPOSED",
@@ -518,6 +519,158 @@ def _dispatch_full_sz_decomposed(
     )
 
 
+def _write_eigenvalues_h5(
+    out_subdir: str,
+    eigenvalues: list,
+    num_sites: int,
+    *,
+    extra_attrs: Optional[dict] = None,
+) -> "object":
+    """Persist a flat sorted spectrum to ``ed_results.h5:/eigendata/``.
+
+    This is the on-disk contract the NLCE summation step
+    (``NLC_sum.py`` / ``NLC_sum_triangular.py``) reads: a single
+    ``/eigendata/eigenvalues`` dataset with the complete multiset of
+    eigenvalues. Shared by :func:`_dispatch_full_sz_decomposed` and
+    :func:`_dispatch_full_symmetry_decomposed`.
+    """
+    import h5py
+    import numpy as np
+
+    eig_array = np.asarray(sorted(eigenvalues), dtype=np.float64)
+    h5_path = os.path.join(out_subdir, "ed_results.h5")
+    with h5py.File(h5_path, "w") as f:
+        grp = f.create_group("eigendata")
+        grp.create_dataset("eigenvalues", data=eig_array)
+        grp.attrs["num_eigenvalues"] = len(eig_array)
+        grp.attrs["hilbert_dim"] = 1 << int(num_sites)
+        grp.attrs["num_sites"] = int(num_sites)
+        for k, v in (extra_attrs or {}).items():
+            grp.attrs[k] = v
+    return eig_array
+
+
+# Process-local cache of discovered spatial symmetry generators, keyed by
+# a content hash of the cluster's (Trans.dat, InterAll.dat). Repeated
+# cluster topologies across NLCE orders reuse the (relatively expensive)
+# pynauty automorphism + clique search instead of recomputing it.
+_SYMMETRY_GENERATOR_CACHE: dict[str, object] = {}
+
+
+def _cluster_topology_hash(ham_subdir: str) -> Optional[str]:
+    """Stable hash of the cluster's Hamiltonian files (Trans + InterAll).
+
+    Used as the key for :data:`_SYMMETRY_GENERATOR_CACHE`. Returns
+    ``None`` if neither file is present (nothing to key on)."""
+    import hashlib
+
+    h = hashlib.sha1()
+    found = False
+    for name in ("Trans.dat", "InterAll.dat"):
+        path = os.path.join(ham_subdir, name)
+        if os.path.exists(path):
+            found = True
+            with open(path, "rb") as fh:
+                h.update(name.encode())
+                h.update(fh.read())
+    return h.hexdigest() if found else None
+
+
+def _discover_symmetry_generators(op, ham_subdir: str):
+    """Return a cached ``GeneratorSet`` of spatial generators for ``op``.
+
+    Runs :func:`qed.find_symmetries` once per distinct cluster topology
+    (keyed by :func:`_cluster_topology_hash`) and memoises the result so
+    higher NLCE orders that re-encounter the same sub-cluster skip the
+    automorphism search. Returns ``None`` when no non-trivial spatial
+    symmetry is found (or detection fails)."""
+    key = _cluster_topology_hash(ham_subdir)
+    if key is not None and key in _SYMMETRY_GENERATOR_CACHE:
+        return _SYMMETRY_GENERATOR_CACHE[key]
+
+    gens = None
+    try:
+        report = qed.find_symmetries(op, verbose=False)
+        if (report is not None and report.full_set is not None
+                and len(report.full_set.generators) > 0):
+            gens = report.full_set
+    except Exception as exc:
+        logging.warning(
+            "[qed_backend] find_symmetries failed (%s); "
+            "FULL_SYMMETRIZED falls back to Sz-only decomposition.", exc,
+        )
+        gens = None
+
+    if key is not None:
+        _SYMMETRY_GENERATOR_CACHE[key] = gens
+    return gens
+
+
+def _dispatch_full_symmetry_decomposed(
+    ham_subdir: str,
+    out_subdir: str,
+    num_sites: int,
+    options: EDOptions,
+    device: str,
+) -> None:
+    """Full spectrum decomposed by ALL ``(Sz x spatial)`` symmetries.
+
+    The memory-light path: discovers the cluster's spatial symmetry
+    generators (cached per topology), then calls
+    :func:`qed.full_spectrum`, which loops every ``(n_up, spatial irrep)``
+    block through the on-the-fly representative SpMV (no orbit-CSR
+    materialisation) and returns the complete sorted spectrum. The full
+    multiset is written to the standard ``/eigendata/eigenvalues``
+    contract so the existing NLCE summation reads it unchanged.
+
+    When no spatial symmetry is found this still yields the correct
+    complete spectrum (decomposed by Sz only, or dense if Sz is not
+    conserved) — i.e. it degrades gracefully to the
+    :func:`_dispatch_full_sz_decomposed` result.
+    """
+    N = int(num_sites)
+    op = qed.Operator(num_sites=N, spin=float(options.spin_length))
+    trans = os.path.join(ham_subdir, "Trans.dat")
+    inter = os.path.join(ham_subdir, "InterAll.dat")
+    if os.path.exists(trans):
+        op.load_trans(trans)
+    if os.path.exists(inter):
+        op.load_inter_all(inter)
+
+    gens = _discover_symmetry_generators(op, ham_subdir)
+
+    result = qed.full_spectrum(
+        op,
+        symmetry=gens,
+        spin_length=float(options.spin_length),
+        device=device,
+        verbose=False,
+    )
+    eigs = result.eigenvalues
+    eigs = eigs.tolist() if hasattr(eigs, "tolist") else list(eigs)
+
+    if not eigs:
+        raise RuntimeError(
+            f"FULL_SYMMETRIZED: no eigenvalues obtained (N={N})."
+        )
+
+    n_gens = len(gens.generators) if gens is not None else 0
+    eig_array = _write_eigenvalues_h5(
+        out_subdir, eigs, N,
+        extra_attrs={
+            "sz_decomposed": True,
+            "symmetry_decomposed": True,
+            "num_spatial_generators": int(n_gens),
+        },
+    )
+
+    logging.info(
+        "FULL_SYMMETRIZED: N=%d, %d eigenvalues, %d spatial generators, "
+        "E_gs=%.6f",
+        N, len(eig_array), n_gens, eig_array[0],
+    )
+
+
 def run_ed_in_process(
     ham_subdir: str,
     output_dir: str,
@@ -557,6 +710,41 @@ def run_ed_in_process(
                 "[%s] eigenvalue cache lookup failed: %s", log_tag, exc
             )
             cache_key = None
+
+    # FULL_SYMMETRIZED is an NLCE-level composite method (no single
+    # qed.DiagonalizationMethod backs it): it sweeps every (Sz x spatial
+    # irrep) block via qed.full_spectrum. Intercept it before the generic
+    # resolver, which only knows the bound DiagonalizationMethod names.
+    _m = options.method.upper()
+    if _m in ("FULL_SYMMETRIZED", "FULL_SYMMETRIZED_GPU"):
+        use_gpu = _m.endswith("_GPU")
+        if use_gpu and not qed.has_cuda_build():
+            logging.error(
+                "[%s] requested GPU method '%s' but qed build has no "
+                "CUDA support.", log_tag, options.method,
+            )
+            return False
+        out_subdir = os.path.join(output_dir, "output")
+        os.makedirs(out_subdir, exist_ok=True)
+        try:
+            _dispatch_full_symmetry_decomposed(
+                ham_subdir, out_subdir, int(num_sites), options,
+                "gpu" if use_gpu else "cpu",
+            )
+        except Exception as exc:
+            logging.error(
+                "[%s] in-process ED failed: %s", log_tag, exc,
+                exc_info=True,
+            )
+            return False
+        if cache is not None and cache_key is not None:
+            try:
+                cache.store(cache_key, output_dir)
+            except Exception as exc:
+                logging.warning(
+                    "[%s] eigenvalue cache store failed: %s", log_tag, exc
+                )
+        return True
 
     try:
         method_enum, use_gpu, use_fixed_sz, use_sz_decomposed = (

@@ -32,10 +32,14 @@ class FullEDPipeline(Pipeline):
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         g = parser.add_argument_group("full_ed pipeline")
-        g.add_argument("--method", type=str, default="FULL",
-                       help="ED method (FULL, FULL_GPU, LANCZOS, ...). "
-                            "MPI-only methods (SCALAPACK*, mTPQ_MPI) are "
-                            "rejected by the in-process backend.")
+        g.add_argument("--method", type=str, default="FULL_SYMMETRIZED",
+                       help="ED method (default: FULL_SYMMETRIZED -- the "
+                            "memory-light full spectrum decomposed by all "
+                            "(Sz x spatial) symmetries via the on-the-fly "
+                            "representative SpMV). Pass FULL for the legacy "
+                            "dense path, FULL_GPU, LANCZOS, etc. MPI-only "
+                            "methods (SCALAPACK*, mTPQ_MPI) are rejected by "
+                            "the in-process backend.")
         # Back-compat: legacy ScaLAPACK auto-promotion knobs are no
         # longer used (the in-process backend cannot host MPI). Kept
         # as silent argparse aliases so existing CLI lines do not break.
@@ -76,7 +80,7 @@ class FullEDPipeline(Pipeline):
             basis_cache_dir = None  # let workflow plumb it in via extra_flags if needed
 
         return EDOptions(
-            method=getattr(args, "method", "FULL"),
+            method=getattr(args, "method", "FULL_SYMMETRIZED"),
             eigenvalues="FULL",
             thermo=getattr(args, "thermo", False),
             temp_min=args.temp_min,
