@@ -662,47 +662,97 @@ class NLCExpansion:
         return bare_sum + euler_tail
     
     def wynn_epsilon(self, sequence):
-        """
-        Apply Wynn's epsilon algorithm for series acceleration.
-        
-        Args:
-            sequence: Array of partial sums or sequence values
-            
-        Returns:
-            Accelerated approximation using epsilon algorithm
+        """Wynn epsilon algorithm for series acceleration.
+
+        sequence: list or 2-D array; each element may be a scalar or a
+        1-D array of length n_temps.  Element-wise sentinel handling ensures
+        no blow-up in one temperature contaminates others.
         """
         n = len(sequence)
         if n < 3:
             return sequence[-1] if n > 0 else 0.0
-            
-        # Initialize epsilon table
-        if len(sequence.shape) > 1:
-            eps = np.zeros((n + 1, n + 1, sequence.shape[1]))
+
+        seq = [np.asarray(s, dtype=float) for s in sequence]
+        SENTINEL = 1e50
+        is_array = seq[0].ndim > 0
+        if is_array:
+            shape = seq[0].shape
+            eps = np.zeros((n + 1, n) + shape)
+            for i in range(n):
+                eps[1, i] = seq[i]
+            for j in range(2, n + 1):
+                for i in range(n - j + 1):
+                    diff = eps[j-1, i+1] - eps[j-1, i]
+                    result = np.full(shape, SENTINEL)
+                    ok = np.abs(diff) > 1e-15 * (1.0 + np.abs(eps[j-1, i]))
+                    if np.any(ok):
+                        result[ok] = eps[j-2, i+1][ok] + 1.0 / diff[ok]
+                    eps[j, i] = result
+            best = seq[-1].copy()
+            for j in range(3, n + 1, 2):
+                ok = np.abs(eps[j, 0]) < SENTINEL * 0.1
+                best[ok] = eps[j, 0][ok]
+            return best
         else:
-            eps = np.zeros((n + 1, n + 1))
-            
-        # Set initial values
-        eps[0, :] = 0.0
-        for i in range(n):
-            eps[1, i] = sequence[i]
-            
-        # Fill epsilon table
-        for k in range(2, n + 1):
-            for i in range(n - k + 1):
-                denominator = eps[k-1, i+1] - eps[k-1, i]
-                # Avoid division by zero
-                if np.any(np.abs(denominator) < 1e-15):
-                    eps[k, i] = eps[k-1, i+1]
-                else:
-                    eps[k, i] = eps[k-2, i+1] + 1.0 / denominator
-                    
-        # Return the most accelerated value (highest even k)
-        max_even_k = 2 * ((n) // 2)
-        if max_even_k > 0:
-            return eps[max_even_k, 0]
-        else:
-            return sequence[-1]
-    
+            eps_s = np.zeros((n + 1, n))
+            for i in range(n):
+                eps_s[1, i] = seq[i].item() if seq[i].ndim == 0 else seq[i]
+            for j in range(2, n + 1):
+                for i in range(n - j + 1):
+                    diff = eps_s[j-1, i+1] - eps_s[j-1, i]
+                    if abs(diff) < 1e-15 * (1.0 + abs(eps_s[j-1, i])):
+                        eps_s[j, i] = SENTINEL
+                    else:
+                        eps_s[j, i] = eps_s[j-2, i+1] + 1.0 / diff
+            best_s = float(seq[-1])
+            for j in range(3, n + 1, 2):
+                if abs(eps_s[j, 0]) < SENTINEL * 0.1:
+                    best_s = eps_s[j, 0]
+            return best_s
+
+    def brezinski_theta(self, partial_sums):
+        """Brezinski theta algorithm for series acceleration.
+
+        Iteratively applies the Wynn-epsilon recurrence and collects even-column
+        estimates (θ₂, θ₄, …), returning the last stable one.  Falls back to
+        the last partial sum if no even column converges.
+
+        partial_sums: list or 2-D array; each element may be a scalar or a
+        1-D array of length n_temps.
+        """
+        n = len(partial_sums)
+        if n < 3:
+            return partial_sums[-1] if n > 0 else np.zeros_like(self.temp_values)
+        seq_arr = np.array(partial_sums, dtype=float)
+        seq_range = np.max(np.abs(seq_arr), axis=0) + 1e-10
+        max_allowed = 100 * seq_range
+        eps_den = 1e-14
+        theta_prev = np.zeros_like(seq_arr)
+        theta_curr = seq_arr.copy()
+        evens = []
+        for iteration in range(1, n):
+            n_curr = theta_curr.shape[0]
+            if n_curr < 2:
+                break
+            theta_next = np.zeros((n_curr - 1,) + theta_curr.shape[1:])
+            for i in range(n_curr - 1):
+                denom = theta_curr[i+1] - theta_curr[i]
+                mask_small = np.abs(denom) < eps_den
+                raw = np.where(mask_small, theta_curr[i+1],
+                               theta_prev[i+1] + 1.0 / np.where(mask_small, 1.0, denom))
+                theta_next[i] = np.where(np.abs(raw) > max_allowed, theta_curr[i+1], raw)
+            theta_prev = theta_curr
+            theta_curr = theta_next
+            if iteration % 2 == 0 and theta_curr.shape[0] > 0:
+                candidate = theta_curr[0].copy()
+                if not np.any(np.abs(candidate) > max_allowed):
+                    evens.append(candidate)
+        if len(evens) >= 1:
+            result = evens[-1]
+            return result.item() if result.ndim == 0 else result
+        last = np.asarray(partial_sums[-1])
+        return last.item() if last.ndim == 0 else last.copy()
+
     def pade_approximant(self, coefficients, m=None, n=None):
         """
         Construct Padé approximant [m/n] from series coefficients.
@@ -922,6 +972,11 @@ class NLCExpansion:
             
         print(f"Using resummation method: {method}")
         
+        # Normalise aliases so callers can use the same names as other kernels
+        _ALIAS = {'none': 'direct', 'theta': 'brezinski', 'wynn_multi': 'wynn',
+                  'entropy_derived': 'euler'}
+        method = _ALIAS.get(method, method)
+
         if method == 'direct':
             return partial_sums[-1]
         elif method == 'euler':
@@ -932,6 +987,8 @@ class NLCExpansion:
             return self.shanks_transform(partial_sums)
         elif method == 'aitken':
             return self.aitken_delta2(partial_sums)
+        elif method == 'brezinski':
+            return self.brezinski_theta(partial_sums)
         elif method == 'pade':
             # WARNING: Padé approximants are designed for power series in a variable x.
             # NLCE partial sums are NOT power series coefficients - they are cumulative

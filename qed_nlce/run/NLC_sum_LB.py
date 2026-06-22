@@ -446,17 +446,84 @@ class LanczosBoostNLCExpansion:
         results['temperatures'] = self.temp_values
         return results
     
+    def wynn_epsilon(self, partial_sums):
+        """Wynn epsilon algorithm. partial_sums: 2-D array (n_orders, n_temps)."""
+        n = len(partial_sums)
+        if n < 2:
+            return partial_sums[-1] if n > 0 else np.zeros_like(self.temp_values)
+        seq = [partial_sums[i] for i in range(n)]
+        SENTINEL = 1e50
+        shape = np.asarray(seq[0]).shape
+        eps = np.zeros((n + 1, n) + shape)
+        for i in range(n):
+            eps[1, i] = np.asarray(seq[i])
+        for j in range(2, n + 1):
+            for i in range(n - j + 1):
+                diff = eps[j-1, i+1] - eps[j-1, i]
+                result = np.full(shape, SENTINEL)
+                ok = np.abs(diff) > 1e-15 * (1.0 + np.abs(eps[j-1, i]))
+                if np.any(ok):
+                    result[ok] = eps[j-2, i+1][ok] + 1.0 / diff[ok]
+                eps[j, i] = result
+        best = np.asarray(seq[-1]).copy()
+        for j in range(3, n + 1, 2):
+            ok = np.abs(eps[j, 0]) < SENTINEL * 0.1
+            best[ok] = eps[j, 0][ok]
+        return best
+
+    def brezinski_theta(self, partial_sums):
+        """Brezinski theta algorithm. partial_sums: 2-D array (n_orders, n_temps)."""
+        n = len(partial_sums)
+        if n < 3:
+            return partial_sums[-1] if n > 0 else np.zeros_like(self.temp_values)
+        seq_arr = np.asarray(partial_sums, dtype=float)
+        seq_range = np.max(np.abs(seq_arr), axis=0) + 1e-10
+        max_allowed = 100 * seq_range
+        eps_den = 1e-14
+        theta_prev = np.zeros_like(seq_arr)
+        theta_curr = seq_arr.copy()
+        evens = []
+        for iteration in range(1, n):
+            n_curr = theta_curr.shape[0]
+            if n_curr < 2:
+                break
+            theta_next = np.zeros((n_curr - 1,) + theta_curr.shape[1:])
+            for i in range(n_curr - 1):
+                denom = theta_curr[i+1] - theta_curr[i]
+                mask_small = np.abs(denom) < eps_den
+                raw = np.where(mask_small, theta_curr[i+1],
+                               theta_prev[i+1] + 1.0 / np.where(mask_small, 1.0, denom))
+                theta_next[i] = np.where(np.abs(raw) > max_allowed, theta_curr[i+1], raw)
+            theta_prev = theta_curr
+            theta_curr = theta_next
+            if iteration % 2 == 0 and theta_curr.shape[0] > 0:
+                candidate = theta_curr[0].copy()
+                if not np.any(np.abs(candidate) > max_allowed):
+                    evens.append(candidate)
+        if len(evens) >= 1:
+            return evens[-1]
+        return partial_sums[-1].copy()
+
     def _apply_resummation(self, partial_sums, method, prop_name):
         """Apply resummation method to partial sums."""
         if len(partial_sums) == 0:
             return np.zeros_like(self.temp_values)
-        
+
+        # Normalise aliases so callers can use the same names as other kernels
+        _ALIAS = {'none': 'direct', 'shanks': 'wynn', 'pade': 'wynn',
+                  'wynn_multi': 'wynn', 'aitken': 'wynn', 'theta': 'brezinski'}
+        method = _ALIAS.get(method, method)
+
         if method == 'auto' or method == 'direct':
             return partial_sums[-1]
         elif method == 'euler':
             return self._euler_resummation(partial_sums)
+        elif method == 'wynn':
+            return self.wynn_epsilon(partial_sums)
+        elif method == 'brezinski':
+            return self.brezinski_theta(partial_sums)
         else:
-            logging.info(f"{prop_name}: Using direct summation")
+            logging.warning(f"{prop_name}: Unknown resummation method '{method}', using direct summation")
             return partial_sums[-1]
     
     def _euler_resummation(self, partial_sums, l=3):

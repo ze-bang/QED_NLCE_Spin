@@ -560,10 +560,13 @@ class NLCExpansionTriangular:
             return np.median(estimates_arr, axis=0)
     
     def brezinski_theta(self, partial_sums):
-        """Brezinski's theta algorithm for series acceleration.
-        
-        Unlike Wynn epsilon, the theta algorithm uses ALL terms regardless
-        of whether n is even or odd.  It constructs a three-column recurrence:
+        """Brezinski theta algorithm for series acceleration.
+
+        Iteratively applies the Wynn-epsilon recurrence and collects even-column
+        estimates (θ₂, θ₄, …).  Returns the last stable even-column estimate at
+        row 0, falling back to the last partial sum if none converge.
+
+        Supports both scalar and array-valued sequences.
         
             θ_{-1}^{(n)} = 0
             θ_0^{(n)}    = S_n
@@ -582,89 +585,37 @@ class NLCExpansionTriangular:
         n = len(partial_sums)
         if n < 3:
             return partial_sums[-1] if n > 0 else 0.0
-        
-        SENTINEL = 1e50
-        first = partial_sums[0]
-        is_array = hasattr(first, '__len__')
-        
-        if is_array:
-            shape = np.asarray(first).shape
-            # theta[k][i] and omega[k][i]
-            theta = {}
-            for i in range(n):
-                theta[(-1, i)] = np.zeros(shape)
-                theta[(0, i)] = np.asarray(partial_sums[i]).copy()
-            
-            max_k = (n - 1) // 2  # each theta level consumes 2 terms
-            for k in range(max_k):
-                # omega_k^(i) = theta_{k-1}^(i+1) + 1/(theta_k^(i+1) - theta_k^(i))
-                omega = {}
-                for i in range(n - 2*k - 1):
-                    diff = theta[(k, i+1)] - theta[(k, i)]
-                    result = np.full(shape, SENTINEL)
-                    ok = np.abs(diff) > 1e-15 * (1 + np.abs(theta[(k, i)]))
-                    if np.any(ok):
-                        result[ok] = theta[(k-1, i+1)][ok] + 1.0 / diff[ok]
-                    omega[(k, i)] = result
-                
-                # theta_{k+1}^(i) from omega
-                for i in range(n - 2*k - 2):
-                    diff_theta = theta[(k, i+2)] - theta[(k, i+1)]
-                    diff_theta_prev = theta[(k, i+1)] - theta[(k, i)]
-                    result = np.full(shape, SENTINEL)
-                    # ratio = diff_theta / diff_theta_prev
-                    ok_denom = np.abs(diff_theta_prev) > 1e-15 * (1 + np.abs(theta[(k, i)]))
-                    ratio = np.zeros(shape)
-                    ratio[ok_denom] = diff_theta[ok_denom] / diff_theta_prev[ok_denom]
-                    factor_denom = ratio - 1.0
-                    ok = ok_denom & (np.abs(factor_denom) > 1e-15)
-                    if np.any(ok):
-                        result[ok] = omega[(k, i+1)][ok] + diff_theta[ok] / factor_denom[ok]
-                    theta[(k+1, i)] = result
-            
-            # Best estimate: highest k at row 0 that isn't blown up
-            best = np.asarray(partial_sums[-1]).copy()
-            for k in range(1, max_k + 1):
-                if (k, 0) in theta:
-                    ok = np.abs(theta[(k, 0)]) < SENTINEL * 0.1
-                    best[ok] = theta[(k, 0)][ok]
-            return best
-        else:
-            # Scalar path
-            theta = {}
-            for i in range(n):
-                theta[(-1, i)] = 0.0
-                s = partial_sums[i]
-                theta[(0, i)] = s[0] if hasattr(s, '__len__') else s
-            
-            max_k = (n - 1) // 2
-            for k in range(max_k):
-                omega = {}
-                for i in range(n - 2*k - 1):
-                    diff = theta[(k, i+1)] - theta[(k, i)]
-                    if abs(diff) < 1e-15 * (1 + abs(theta[(k, i)])):
-                        omega[(k, i)] = SENTINEL
-                    else:
-                        omega[(k, i)] = theta[(k-1, i+1)] + 1.0 / diff
-                
-                for i in range(n - 2*k - 2):
-                    diff_theta = theta[(k, i+2)] - theta[(k, i+1)]
-                    diff_theta_prev = theta[(k, i+1)] - theta[(k, i)]
-                    if abs(diff_theta_prev) < 1e-15 * (1 + abs(theta[(k, i)])):
-                        theta[(k+1, i)] = SENTINEL
-                    else:
-                        ratio = diff_theta / diff_theta_prev
-                        if abs(ratio - 1.0) < 1e-15:
-                            theta[(k+1, i)] = SENTINEL
-                        else:
-                            theta[(k+1, i)] = omega[(k, i+1)] + diff_theta / (ratio - 1.0)
-            
-            s_last = partial_sums[-1]
-            best = s_last[0] if hasattr(s_last, '__len__') else s_last
-            for k in range(1, max_k + 1):
-                if (k, 0) in theta and abs(theta[(k, 0)]) < SENTINEL * 0.1:
-                    best = theta[(k, 0)]
-            return best
+
+        seq_arr = np.array(partial_sums)      # shape (n, ...) — works for both scalar and array
+        seq_range = np.max(np.abs(seq_arr), axis=0) + 1e-10
+        max_allowed = 100 * seq_range
+        eps_den = 1e-14
+
+        theta_prev = np.zeros_like(seq_arr)   # θ_{k-1}: starts as zero (θ_{-1} = 0)
+        theta_curr = seq_arr.copy()            # θ_0 = S_n
+
+        evens = []
+        for iteration in range(1, n):
+            n_curr = theta_curr.shape[0]
+            if n_curr < 2:
+                break
+            theta_next = np.zeros((n_curr - 1,) + theta_curr.shape[1:])
+            for i in range(n_curr - 1):
+                denom = theta_curr[i+1] - theta_curr[i]
+                mask_small = np.abs(denom) < eps_den
+                raw = np.where(mask_small, theta_curr[i+1],
+                               theta_prev[i+1] + 1.0 / np.where(mask_small, 1.0, denom))
+                theta_next[i] = np.where(np.abs(raw) > max_allowed, theta_curr[i+1], raw)
+            theta_prev = theta_curr
+            theta_curr = theta_next
+            if iteration % 2 == 0 and theta_curr.shape[0] > 0:
+                candidate = theta_curr[0].copy()
+                if not np.any(np.abs(candidate) > max_allowed):
+                    evens.append(candidate)
+
+        if len(evens) >= 1:
+            return evens[-1]
+        return np.asarray(partial_sums[-1]).copy()
     
     def iterated_aitken(self, partial_sums):
         """Iterated Aitken Δ² (Shanks) transformation.
