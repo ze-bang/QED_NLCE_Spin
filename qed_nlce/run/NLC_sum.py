@@ -229,17 +229,6 @@ class NLCExpansion:
                       f"{num_eig}/{dim} eigenvalues ({fraction*100:.1f}%), "
                       f"E_cutoff = {cutoff:.4f}")
     
-    def get_subclusters(self, cluster_id):
-        """
-        Get all subclusters of a given cluster.
-        For this demo, we'll just use a simple heuristic based on order.
-        
-        In a full implementation, this would use the actual topology data.
-        """
-        order = self.clusters[cluster_id]['order']
-        return [cid for cid, data in self.clusters.items() 
-                if data['order'] < order]
-    
     def calculate_thermodynamic_quantities(self, eigenvalues):
         """
         Calculate thermodynamic quantities from eigenvalues.
@@ -287,9 +276,10 @@ class NLCExpansion:
             # where ln(Z) = ln(Z_shifted) + β*ground_state_energy
             entropy = (np.log(Z_shifted) + (energy - ground_state_energy) / (temp))
             if self.SI:
-                specific_heat *= (6.02214076e23  * 1.380649e-23)  # Convert to SI units (J/K)
-                entropy *= (6.02214076e23 * 1.380649e-23)
-                energy *= (6.02214076e23 * 1.380649e-23)
+                R = 6.02214076e23 * 1.380649e-23  # ≈ 8.314 J/(mol·K)
+                specific_heat *= R  # dimensionless → J/(mol·K)
+                entropy *= R        # dimensionless → J/(mol·K)
+                energy *= R         # K → J/mol
             results['energy'][i] = energy
             results['specific_heat'][i] = specific_heat 
             results['entropy'][i] = entropy
