@@ -43,13 +43,23 @@ def test_auto_pipeline_is_registered():
     assert "auto" in list_pipelines()
 
 
-def test_auto_picks_full_for_small_clusters():
+def test_auto_picks_full_symmetrized_for_small_clusters():
+    """Small clusters (below the FULL-ED ceiling) use FULL_SYMMETRIZED:
+    Sz + spatial symmetry decomposition via qed.full_spectrum."""
     pipe = get_pipeline("auto")
     args = _build_args()
     opts = pipe.make_ed_options(args, num_sites=8)  # 2^8 = 256
-    assert opts.method == "FULL"
+    assert opts.method == "FULL_SYMMETRIZED"
     assert opts.eigenvalues == "FULL"
     assert opts.thermo is True
+
+
+def test_auto_fixed_sz_overrides_full_symmetrized():
+    """--auto_fixed_sz still routes to FULL_FIXED_SZ (legacy Sz=0 approx)."""
+    pipe = get_pipeline("auto")
+    args = _build_args(auto_fixed_sz=True)
+    opts = pipe.make_ed_options(args, num_sites=8)
+    assert opts.method == "FULL_FIXED_SZ"
 
 
 def test_auto_picks_iterative_above_crossover_kpm_default():

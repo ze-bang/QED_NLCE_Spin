@@ -218,22 +218,24 @@ class AutoHybridPipeline(FTLMPipeline):
         # Symmetry axes (orthogonal -- can be combined).
         g.add_argument(
             "--auto_sz_decomposed", action="store_true",
-            help="Exploit Sz conservation by iterating all Sz sectors "
-                 "individually (each has dim C(N,k) instead of 2^N) and "
-                 "recombining the full partition function. Correct for "
-                 "finite-T NLCE. Auto-enabled by --auto_sz_detect.",
+            help="(No-op for FULL-ED clusters: FULL_SYMMETRIZED already "
+                 "iterates all Sz sectors. Still applies to the iterative "
+                 "backend, e.g. FTLM_SZ_DECOMPOSED / KPM_DOS_SZ_DECOMPOSED.)",
         )
         g.add_argument(
             "--auto_fixed_sz", action="store_true",
-            help="(Legacy) Restrict to single Sz=0 sector only. "
-                 "Approximate at finite T — use --auto_sz_decomposed "
-                 "for correct thermodynamics.",
+            help="(Legacy) For FULL-ED clusters, restrict to Sz=0 sector "
+                 "only (FULL_FIXED_SZ). Approximate at finite T. For the "
+                 "iterative backend, routes through FTLM_FIXED_SZ / "
+                 "KPM_DOS_FIXED_SZ.",
         )
         g.add_argument(
             "--auto_streaming_symmetry", action="store_true",
-            help="Exploit the geometric automorphism group of each "
-                 "cluster (orbit-basis sector decomposition). Cached "
-                 "per cluster under <ham_dir>/basis_cache/.",
+            help="For the iterative backend (FTLM/KPM_DOS), exploit the "
+                 "cluster's geometric automorphism group via streaming "
+                 "symmetry. FULL-ED clusters already use FULL_SYMMETRIZED "
+                 "(Sz + spatial), so this flag only affects the large-cluster "
+                 "path.",
         )
         g.add_argument(
             "--auto_sz_detect", action="store_true", default=True,
@@ -275,8 +277,20 @@ class AutoHybridPipeline(FTLMPipeline):
 
         # ---- Below the crossover: FULL ED (exact, noise-free) ----
         if hilbert_dim <= full_ceiling:
+            # FULL_SYMMETRIZED decomposes by ALL (Sz × spatial) symmetries
+            # via qed.full_spectrum + on-the-fly RepMV. It subsumes the
+            # _SZ_DECOMPOSED behaviour (iterates every Sz sector) and adds
+            # spatial block-diagonalisation (cluster automorphism group,
+            # cached per topology). Falls back gracefully to Sz-only when
+            # no spatial generators are found. The only exception is
+            # --auto_fixed_sz, which intentionally restricts to Sz=0 as an
+            # explicit legacy approximation.
+            if getattr(args, "auto_fixed_sz", False):
+                full_method = "FULL_FIXED_SZ"
+            else:
+                full_method = "FULL_SYMMETRIZED"
             return EDOptions(
-                method=self._maybe_sz_suffix(args, "FULL"),
+                method=full_method,
                 eigenvalues="FULL",
                 thermo=True,  # NLC_sum_ftlm reads /thermodynamics/{...}
                 temp_min=args.temp_min,
