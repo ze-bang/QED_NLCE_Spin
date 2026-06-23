@@ -233,58 +233,44 @@ class NLCExpansion:
         """
         Calculate thermodynamic quantities from eigenvalues.
         Uses a numerically stable approach to handle large beta values (low temperatures).
-        
+
         Returns:
             Dictionary with 'energy', 'specific_heat', and 'entropy' as keys
         """
-        results = {
-            'energy': np.zeros_like(self.temp_values),
-            'specific_heat': np.zeros_like(self.temp_values),
-            'entropy': np.zeros_like(self.temp_values)
+        ground_state_energy = np.min(eigenvalues)
+        shifted = eigenvalues - ground_state_energy
+
+        T = self.temp_values
+        # Use T_safe to avoid division by zero for very low T points;
+        # those results are overridden by the ground-state limit below.
+        T_safe = np.maximum(T, 1e-10)
+
+        # exp_terms[j, i] = exp(-shifted[j] / T[i])   shape: (n_eigs, n_temps)
+        exp_terms = np.exp(-shifted[:, np.newaxis] / T_safe[np.newaxis, :])
+        Z = exp_terms.sum(axis=0)                                          # (n_temps,)
+
+        energy = (eigenvalues[:, np.newaxis] * exp_terms).sum(axis=0) / Z
+        energy_sq = ((eigenvalues**2)[:, np.newaxis] * exp_terms).sum(axis=0) / Z
+        specific_heat = (energy_sq - energy**2) / T_safe**2
+        entropy = np.log(Z) + (energy - ground_state_energy) / T_safe
+
+        # T→0 limit: ground-state energy, Cv→0, S→0 (third law)
+        low_T = T < 1e-5
+        energy = np.where(low_T, ground_state_energy, energy)
+        specific_heat = np.where(low_T, 0.0, specific_heat)
+        entropy = np.where(low_T, 0.0, entropy)
+
+        if self.SI:
+            R = 6.02214076e23 * 1.380649e-23  # ≈ 8.314 J/(mol·K)
+            specific_heat = specific_heat * R  # dimensionless → J/(mol·K)
+            entropy = entropy * R              # dimensionless → J/(mol·K)
+            energy = energy * R               # K → J/mol
+
+        return {
+            'energy': energy,
+            'specific_heat': specific_heat,
+            'entropy': entropy,
         }
-        
-        for i, temp in enumerate(self.temp_values):
-            # For extremely large beta (low T), use ground state approximation
-            if temp < 1e-5:
-                ground_state_energy = np.min(eigenvalues)
-                results['energy'][i] = ground_state_energy
-                results['specific_heat'][i] = 0.0  # Specific heat approaches 0 as T->0
-                results['entropy'][i] = 0.0  # Entropy approaches 0 as T->0 (third law)
-                continue
-                
-            # Find ground state energy (minimum eigenvalue)
-            ground_state_energy = np.min(eigenvalues)
-            
-            # Shift eigenvalues by ground state energy for numerical stability
-            shifted_eigenvalues = eigenvalues - ground_state_energy
-            
-            # Calculate exponential terms with shifted eigenvalues
-            # exp(-β(Ei-E0)) instead of exp(-βEi) to prevent underflow
-            exp_terms = np.exp(-shifted_eigenvalues / temp)
-            Z_shifted = np.sum(exp_terms)
-            
-            # Calculate energy using original eigenvalues but stable exponentials
-            energy = np.sum(eigenvalues * exp_terms) / Z_shifted
-            
-            # Calculate energy squared
-            energy_squared = np.sum(eigenvalues**2 * exp_terms) / Z_shifted
-            
-            # Specific heat = β² * (⟨E²⟩ - ⟨E⟩²)
-            specific_heat = (energy_squared - energy**2) / (temp * temp)
-            # Calculate entropy, accounting for shifted partition function
-            # S = kB * [ln(Z) + βE]
-            # where ln(Z) = ln(Z_shifted) + β*ground_state_energy
-            entropy = (np.log(Z_shifted) + (energy - ground_state_energy) / (temp))
-            if self.SI:
-                R = 6.02214076e23 * 1.380649e-23  # ≈ 8.314 J/(mol·K)
-                specific_heat *= R  # dimensionless → J/(mol·K)
-                entropy *= R        # dimensionless → J/(mol·K)
-                energy *= R         # K → J/mol
-            results['energy'][i] = energy
-            results['specific_heat'][i] = specific_heat 
-            results['entropy'][i] = entropy
-            
-        return results
     
     def read_spin_expectations(self, spin_exp_dir):
         """
@@ -400,7 +386,6 @@ class NLCExpansion:
                     # Extract all (id, multiplicity) pairs
                     pairs = re.findall(r'\((\d+),\s*(\d+)\)', subclusters_str)
                     for subcluster_id, multiplicity in pairs:
-                        print(f"Adding subcluster {subcluster_id} with multiplicity {multiplicity} to cluster {current_cluster}")
                         self.subcluster_info[current_cluster]['subclusters'][int(subcluster_id)] = int(multiplicity)
     
     def get_subclusters(self, cluster_id):
@@ -429,51 +414,48 @@ class NLCExpansion:
     
     def _topological_sort_clusters(self):
         """
-        Sort clusters in dependency order using topological sort.
-        
+        Sort clusters in dependency order using topological sort (Kahn's algorithm).
+
         A cluster must be processed AFTER all its subclusters, regardless of order.
         This handles cases where a cluster of order N contains subclusters of the same order N.
-        
+
         Returns:
             List of (cluster_id, order) tuples in processing order
         """
-        # Build dependency graph
-        # deps[cluster_id] = set of subcluster IDs that must be processed first
         deps = {}
         for cluster_id in self.clusters:
             subclusters = self.get_subclusters(cluster_id)
             deps[cluster_id] = set(subclusters.keys())
-        
-        # Kahn's algorithm for topological sort
-        # Start with clusters that have no dependencies (order 1 clusters)
+
         in_degree = {cid: len(d) for cid, d in deps.items()}
         queue = [cid for cid, deg in in_degree.items() if deg == 0]
+        in_queue = set(queue)   # O(1) membership check instead of O(n) list scan
+        processed = set()       # O(1) membership check for already-emitted nodes
         sorted_clusters = []
-        
+
         while queue:
-            # Sort queue by order (prefer lower order first for consistency)
             queue.sort(key=lambda cid: (self.clusters[cid]['order'], cid))
             cluster_id = queue.pop(0)
+            in_queue.discard(cluster_id)
             order = self.clusters[cluster_id]['order']
             sorted_clusters.append((cluster_id, order))
-            
-            # Remove this cluster from all dependents' requirements
+            processed.add(cluster_id)
+
             for cid, dep_set in deps.items():
                 if cluster_id in dep_set:
                     dep_set.remove(cluster_id)
                     in_degree[cid] -= 1
-                    if in_degree[cid] == 0 and cid not in [x[0] for x in sorted_clusters] and cid not in queue:
+                    if in_degree[cid] == 0 and cid not in processed and cid not in in_queue:
                         queue.append(cid)
-        
-        # Check for cycles (shouldn't happen in valid NLCE data)
+                        in_queue.add(cid)
+
         if len(sorted_clusters) != len(self.clusters):
-            remaining = set(self.clusters.keys()) - set(x[0] for x in sorted_clusters)
+            remaining = set(self.clusters.keys()) - processed
             print(f"WARNING: Dependency cycle detected! Remaining clusters: {remaining}")
             print("Falling back to order-based sort for remaining clusters.")
-            # Add remaining clusters sorted by order
             for cid in sorted(remaining, key=lambda c: (self.clusters[c]['order'], c)):
                 sorted_clusters.append((cid, self.clusters[cid]['order']))
-        
+
         return sorted_clusters
     
 

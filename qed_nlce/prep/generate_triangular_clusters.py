@@ -14,8 +14,8 @@ Reference cluster counts (site-based NLCE on triangular lattice):
   Order 1: 1 cluster (single site)
   Order 2: 1 cluster (nearest-neighbor bond)
   Order 3: 2 clusters (triangle, bent chain)
-  Order 4: 5 clusters
-  Order 5: 13 clusters
+  Order 4: 4 clusters
+  Order 5: 8 clusters
   ...
 """
 
