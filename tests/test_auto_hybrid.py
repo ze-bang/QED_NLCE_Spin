@@ -29,7 +29,7 @@ def _build_args(**overrides) -> argparse.Namespace:
         auto_full_hilbert=1 << 12,   # SOTA default (May 2026)
         auto_min_samples=40,
         auto_max_samples=200,
-        auto_backend="kpm_dos",      # SOTA default (May 2026)
+        auto_backend="ftlm",          # SOTA default (Jun 2026, after low-T benchmark)
         auto_kpm_kernel="jackson",
         auto_kpm_seed=0,
         auto_kpm_moments=2048,
@@ -62,25 +62,28 @@ def test_auto_fixed_sz_overrides_full_symmetrized():
     assert opts.method == "FULL_FIXED_SZ"
 
 
-def test_auto_picks_iterative_above_crossover_kpm_default():
-    """With the SOTA default backend (kpm_dos), large clusters get KPM_DOS."""
+def test_auto_picks_ftlm_above_crossover_default():
+    """With the SOTA default backend (ftlm), large clusters get FTLM.
+
+    KPM_DOS is 15-20× worse than FTLM at T < 0.3J (benchmark Jun 2026)
+    and is no longer the default. FTLM is the correct low-T workhorse.
+    """
     pipe = get_pipeline("auto")
     args = _build_args(auto_full_hilbert=64)  # force iterative at 8 sites
-    opts = pipe.make_ed_options(args, num_sites=8)
-    assert opts.method == "KPM_DOS"
-    # KPM-DOS knobs are tunneled through samples / krylov_dim.
-    assert opts.samples == args.auto_kpm_random_vectors
-    assert opts.krylov_dim == args.auto_kpm_moments
-
-
-def test_auto_picks_ftlm_above_crossover_when_backend_overridden():
-    """Explicit `--auto_backend=ftlm` still routes to legacy FTLM."""
-    pipe = get_pipeline("auto")
-    args = _build_args(auto_full_hilbert=64, auto_backend="ftlm")
     opts = pipe.make_ed_options(args, num_sites=8)
     assert opts.method == "FTLM"
     assert opts.samples is not None and opts.samples >= args.auto_min_samples
     assert opts.krylov_dim is not None
+
+
+def test_auto_picks_kpm_dos_when_backend_overridden():
+    """Explicit `--auto_backend=kpm_dos` routes to KPM_DOS (for T > 1J use cases)."""
+    pipe = get_pipeline("auto")
+    args = _build_args(auto_full_hilbert=64, auto_backend="kpm_dos")
+    opts = pipe.make_ed_options(args, num_sites=8)
+    assert opts.method == "KPM_DOS"
+    assert opts.samples == args.auto_kpm_random_vectors
+    assert opts.krylov_dim == args.auto_kpm_moments
 
 
 def test_auto_sample_count_decays_with_size():

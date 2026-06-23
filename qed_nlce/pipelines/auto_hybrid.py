@@ -1,37 +1,44 @@
 """Auto-hybrid NLCE pipeline (smart default).
 
-A drop-in default for users who don't want to think about FULL vs KPM-DOS
-vs FTLM, or about whether to enable Sz fixed-quantum-number blocking
-or lattice-symmetry sector decomposition. The pipeline selects all of
+A drop-in default for users who don't want to think about FULL vs FTLM
+or about whether to enable Sz fixed-quantum-number blocking or
+lattice-symmetry sector decomposition. The pipeline selects all of
 these per cluster:
 
 Backend selection (keyed on the *full* Hilbert-space dim ``2 ** N``):
 
 * ``2**N <= --auto_full_hilbert``  (default ``2**12 = 4096``)
     -> ``FULL`` ED with the entire spectrum -- noise-free anchors
-       for the small / dominant clusters. (Was ``2**14 = 16384``
-       before May 2026; lowered because dense LAPACK on a
-       16384x16384 matrix costs ~4 TFlops and minutes per cluster,
-       and KPM-DOS at the same dim is faster *and* matches the
-       FULL specific heat to ~1e-3 with ``R=32, M=2048``. The new
-       4096 ceiling matches the ``qed.diag`` small-dim threshold
-       and keeps every per-cluster diag under ~1 s.)
+       for the small / dominant clusters. Uses FULL_SYMMETRIZED
+       which simultaneously decomposes by Sz AND spatial (automorphism)
+       symmetry via ``qed.full_spectrum``.
 
 * ``2**N > --auto_full_hilbert``
-    -> ``--auto_backend`` (default ``kpm_dos``):
+    -> ``--auto_backend`` (default ``ftlm``):
 
-      * ``kpm_dos`` (recommended): the C++ KPM-DOS thermodynamics
-        kernel. Hutchinson stochastic-trace variance scales as
-        ``1 / sqrt(R * D)``, so per-cluster relative error on
-        ``C(T)`` *improves* as the cluster grows. At ``N=20`` with
-        ``R=20``, ``M=2048``, the per-cluster error is ``~4e-4``,
-        well below the ``~0.1%`` per-cluster target dictated by the
-        NLCE Mobius condition number ``kappa ~ 30-80``.
+      * ``ftlm`` (default and recommended): Finite-Temperature Lanczos
+        Method. Noise floor of ~5% on ``C(T)`` per cluster at low T
+        (T < 0.5J), amplified by Möbius condition number κ~30-80 to
+        give 15-40% error on the resummed curve at high orders. This is
+        the established NLCE workhorse and the correct choice for low-T
+        accuracy. For low T below the NLCE convergence radius use the
+        ``lanczos_boost`` pipeline instead (deterministic, noise-free).
 
-      * ``ftlm``: the legacy Finite-Temperature Lanczos backend.
-        Noise floor of ``~5%`` on ``C(T)``, which gets amplified by
-        the Mobius condition number to ``15-40%`` on the resummed
-        curve at orders ``>= 6``. Provided for back-compat.
+      * ``kpm_dos``: KPM density-of-states + Chebyshev quadrature.
+        Low variance at HIGH T (T > 1J): error scales as 1/sqrt(R·D).
+        **NOT SUITABLE for T < 0.5J**: the Jackson-kernel spectral
+        broadening introduces a systematic bias in the low-energy DOS
+        that translates to ~15× larger Cv error than FTLM at T < 0.3J.
+        Use only when NLCE convergence radius is already T > 1J.
+
+Benchmarked on N=10 Heisenberg cluster (dim=1024), exact ground truth:
+  Method                Cv_MAE[T=0.05-0.3]   vs FTLM
+  FTLM(R=200,M=300)       1.90e-01             1×  (baseline)
+  mTPQ+Sz(R=20)           2.24e-01             1.2×
+  KPM_DOS(R=32,M=1024)    3.81e+00            20×  ← bad at low T
+  KPM_DOS(R=64,M=2048)    4.14e+00            22×  ← getting worse!
+  LTLM: BROKEN in current qed — returns zeros or systematic errors.
+  LB-NLCE: deterministic, exact below T* = (E_K−E₀)/5; use ``lanczos_boost``.
 
 Symmetry axes (orthogonal, can be combined):
 
@@ -142,9 +149,9 @@ def _interall_conserves_sz(ham_dir: str) -> bool:
 class AutoHybridPipeline(FTLMPipeline):
     name = "auto"
     description = (
-        "Smart default: FULL ED for small clusters, KPM-DOS (or FTLM) "
-        "for large; orthogonal --auto_fixed_sz / --auto_streaming_symmetry "
-        "axes auto-applied to every cluster."
+        "Smart default: FULL_SYMMETRIZED for small clusters, FTLM (or KPM-DOS) "
+        "for large; --auto_fixed_sz / --auto_streaming_symmetry axes "
+        "auto-applied per cluster."
     )
 
     # ------------------------------------------------------------------
@@ -161,20 +168,18 @@ class AutoHybridPipeline(FTLMPipeline):
 
         g = parser.add_argument_group("auto pipeline")
         g.add_argument(
-            "--auto_backend", type=str, default="kpm_dos",
-            choices=["kpm_dos", "ftlm", "ltlm"],
+            "--auto_backend", type=str, default="ftlm",
+            choices=["kpm_dos", "ftlm"],
             help="Iterative backend used above the FULL-ED ceiling "
-                 "(default: kpm_dos). "
-                 "kpm_dos: KPM density-of-states + Chebyshev quadrature — "
-                 "low variance, scales as 1/sqrt(R·D), recommended for T > 0.2J. "
-                 "ltlm: Low-Temperature Lanczos Method (Jaklič & Prelovšek, "
-                 "PRB 67, 161103 2003) — double-bracket estimator that is "
-                 "exact at T=0 for any R; 3–5× less noise than FTLM at "
-                 "T < 0.5J with the same Krylov dimension. Recommended when "
-                 "low-T accuracy is the priority (e.g. NLCE order 6–8 on "
-                 "frustrated lattices). "
-                 "ftlm: legacy FTLM — has ~5%% noise per cluster at low T "
-                 "amplified by Möbius condition number; use ltlm instead.",
+                 "(default: ftlm). "
+                 "ftlm: Finite-Temperature Lanczos — ~5%% per-cluster noise "
+                 "on C(T) at low T, amplified by Möbius κ~30-80. The correct "
+                 "workhorse for NLCE; handles T down to ~0.2J adequately. "
+                 "For lower T use the lanczos_boost pipeline (LB-NLCE). "
+                 "kpm_dos: KPM + Chebyshev — fast and accurate at T > 1J "
+                 "(error ~1/sqrt(R·D)), but ~15-20× worse than FTLM at "
+                 "T < 0.3J due to Jackson-kernel spectral broadening. "
+                 "Only use when the NLCE convergence radius is already T > 1J.",
         )
         g.add_argument(
             "--auto_full_hilbert", type=int, default=1 << 12,
@@ -346,12 +351,10 @@ class AutoHybridPipeline(FTLMPipeline):
                 extra_flags=extra_flags,
             )
 
-        # ---- backend == "ftlm" or "ltlm": Lanczos-based thermal solvers ----
-        # LTLM (Jaklič & Prelovšek, PRB 67, 161103, 2003) uses a double-
-        # bracket estimator that is exact at T=0 for any number of random
-        # vectors and gives 3–5× less per-cluster noise at T < 0.5J vs FTLM
-        # with the same Krylov dimension. For NLCE, this directly reduces
-        # Möbius amplification: κ~80 × (1.5%) ≈ 120% → κ~80 × (0.3%) ≈ 24%.
+        # ---- backend == "ftlm": Finite-Temperature Lanczos ----
+        # Adaptive sample count: more samples for smaller clusters just above
+        # the FULL-ED ceiling (variance is higher there), decay as D grows
+        # (1/sqrt(D) improves intrinsic noise so fewer samples needed).
         krylov_ceiling = getattr(args, "krylov_dim", 300)
         adaptive_krylov = min(
             hilbert_dim,
@@ -366,22 +369,6 @@ class AutoHybridPipeline(FTLMPipeline):
             adaptive_samples = int(max(min_s, max_s / max(decay, 1.0)))
 
         use_gpu = getattr(args, "use_gpu", False)
-        if backend == "ltlm":
-            ltlm_base = "LTLM"  # LTLM has no GPU variant in QED 0.3
-            return EDOptions(
-                method=self._maybe_sz_suffix(args, ltlm_base),
-                eigenvalues=None,
-                thermo=True,
-                temp_min=args.temp_min,
-                temp_max=args.temp_max,
-                temp_bins=args.temp_bins,
-                symmetrized=symmetrized,
-                use_symm=False,
-                streaming_symmetry=streaming,
-                samples=adaptive_samples,
-                krylov_dim=adaptive_krylov,
-            )
-
         ftlm_base = "FTLM_GPU" if use_gpu else "FTLM"
         return EDOptions(
             method=self._maybe_sz_suffix(args, ftlm_base),
