@@ -20,3 +20,4 @@ from . import lanczos_boost  # noqa: F401
 from . import ftlm  # noqa: F401
 from . import auto_hybrid  # noqa: F401
 from . import kpm_dos  # noqa: F401
+from . import pyrochlore_order8  # noqa: F401
