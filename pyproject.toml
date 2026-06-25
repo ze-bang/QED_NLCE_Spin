@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "qed_nlce"
 version = "0.1.0"
-description = "Numerical Linked Cluster Expansion (NLCE) workflow built on top of the QED exact-diagonalization toolkit."
+description = "Self-contained Numerical Linked Cluster Expansion (NLCE) workflow with symmetry-adapted full dense exact diagonalization."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
@@ -21,13 +21,10 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
-    # qed is a *required* dep: NLCE pipelines dispatch each cluster
-    # in-process through the canonical qed.solve(H, ...) /
-    # qed.thermal(H, ...) Python verbs. MPI-only methods (SCALAPACK*,
-    # mTPQ_MPI) are not supported by the in-process backend; for
-    # those, invoke the standalone ed_distributed_main directly under
-    # mpiexec.
-    "qed>=0.3.0",
+    # The symmetry-adapted dense diagonalizer is built on
+    # numpy + scipy.linalg.eigh (LAPACK) only. Cluster *generation*
+    # (qed_nlce.prep) additionally requires pynauty for canonical graph
+    # certificates and automorphism counts.
     "numpy>=1.23",
     "scipy>=1.10",
     "h5py>=3.7",
@@ -35,10 +32,16 @@ dependencies = [
     "networkx>=3.0",
     "pandas>=1.5",
     "tqdm>=4.64",
+    "pynauty>=2.8",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "pytest-xdist>=3"]
+
+[tool.pytest.ini_options]
+# Only collect the real test-suite; analysis/ contains CLI scripts that
+# happen to be named ``test_*`` and are not pytest modules.
+testpaths = ["tests"]
 
 [project.scripts]
 qed-nlce = "qed_nlce.cli:main"

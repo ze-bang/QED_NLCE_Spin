@@ -1,18 +1,14 @@
-"""Full / dense ED pipeline.
+"""Full dense ED pipeline.
 
-For each cluster, runs ``--method=FULL`` (or ``FULL_GPU`` if the user
-asks for it) in-process via the qed Python bindings.
+For each cluster, computes the full eigenvalue spectrum in-process via
+the self-contained symmetry-adapted dense solver
+(:func:`qed_nlce.ed.solve_spectrum`).
 
 Summation kernel:
 
 * Pyrochlore -> ``NLC_sum.py``
 * Triangular -> ``NLC_sum_triangular.py`` (with the triangular-specific
   ``--temp_points_file`` / ``--resummation`` knobs forwarded).
-
-Note: the legacy ``SCALAPACK_MIXED`` auto-promotion has been removed.
-MPI-only methods cannot run in the in-process qed backend (a Python
-interpreter cannot call ``MPI_Init``); use the standalone
-``ed_distributed_main`` binary directly for those.
 """
 
 from __future__ import annotations
@@ -28,20 +24,13 @@ from ..geometries import _paths
 @register_pipeline
 class FullEDPipeline(Pipeline):
     name = "full_ed"
-    description = "Full dense ED via the in-process qed backend."
+    description = "Full dense ED via the in-process symmetry-adapted solver."
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         g = parser.add_argument_group("full_ed pipeline")
-        g.add_argument("--method", type=str, default="FULL_SYMMETRIZED",
-                       help="ED method (default: FULL_SYMMETRIZED -- the "
-                            "memory-light full spectrum decomposed by all "
-                            "(Sz x spatial) symmetries via the on-the-fly "
-                            "representative SpMV). Pass FULL for the legacy "
-                            "dense path, FULL_GPU, LANCZOS, etc. MPI-only "
-                            "methods (SCALAPACK*, mTPQ_MPI) are rejected by "
-                            "the in-process backend.")
-        # Back-compat: legacy ScaLAPACK auto-promotion knobs are no
-        # longer used (the in-process backend cannot host MPI). Kept
+        g.add_argument("--method", type=str, default="FULL",
+                       help=argparse.SUPPRESS)
+        # Back-compat: legacy ScaLAPACK knobs are no longer used; kept
         # as silent argparse aliases so existing CLI lines do not break.
         g.add_argument("--scalapack_threshold", type=int, default=16,
                        help=argparse.SUPPRESS)
@@ -80,7 +69,7 @@ class FullEDPipeline(Pipeline):
             basis_cache_dir = None  # let workflow plumb it in via extra_flags if needed
 
         return EDOptions(
-            method=getattr(args, "method", "FULL_SYMMETRIZED"),
+            method=getattr(args, "method", "FULL"),
             eigenvalues="FULL",
             thermo=getattr(args, "thermo", False),
             temp_min=args.temp_min,

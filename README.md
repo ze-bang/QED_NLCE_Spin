@@ -1,183 +1,122 @@
 # QED_NLCE
 
 Numerical Linked Cluster Expansion (NLCE) workflows for frustrated quantum
-spin models, built on top of the [QED](https://github.com/ze-bang/QED) exact
-diagonalization toolkit.
+spin-1/2 models, powered by a **self-contained, symmetry-adapted full dense
+exact diagonalization** core.
 
-This package was extracted from `QED/workflows/nlce/` to allow the NLCE
-toolkit to evolve independently of the underlying ED solver. The Python
-package was renamed `workflows.nlce` → `qed_nlce`.
+The diagonalizer is built on `numpy` + `scipy.linalg.eigh` (LAPACK)
+only: there is no link to any external ED binary or library — every
+cluster is diagonalized in-process. Cluster *generation*
+(`qed_nlce.prep`) additionally uses [`pynauty`](https://github.com/pdobsan/pynauty)
+for canonical graph certificates and automorphism counts.
 
 ## Install
 
 ```bash
-# Install the QED Python package (required runtime dep). qed_nlce
-# calls the canonical qed.solve(H, ...) / qed.thermal(H, ...)
-# Python verbs directly -- the C++ ./ED binary is no longer invoked.
-git clone https://github.com/ze-bang/QED.git
-cd QED && pip install .
-
-# Then install qed_nlce. Pip will pick up the qed dep automatically.
 pip install git+https://github.com/ze-bang/QED_NLCE.git
+# or, from a checkout:
+pip install .
 ```
+
+Runtime dependencies are `numpy`, `scipy`, `h5py`, `matplotlib`,
+`networkx`, `pandas`, `tqdm`, and `pynauty` (the latter only for the
+cluster-generation step).
 
 ## Quick start
 
-**Recommended default — let the framework pick the backend per cluster:**
-
 ```bash
-qed-nlce --geometry triangular_site --pipeline auto \
+qed-nlce --geometry triangular_site --pipeline full_ed \
          --max_order 8 \
          --J1 1.0 --temp_min 0.1 --temp_max 10 --temp_bins 100 --thermo \
-         --base_dir output/tri_auto_o8
-```
+         --base_dir output/tri_full_o8
 
-The `auto` pipeline runs FULL dense ED below `--auto_full_hilbert`
-(default `2**14 = 16384`) and switches to KPM-DOS thermodynamics
-above. KPM-DOS Hutchinson variance scales as `1/sqrt(R*D)` so
-per-cluster error *improves* as the cluster grows — at `N=20`,
-`R=20`, `M=2048` it is `~4e-4`, comfortably below the per-cluster
-target dictated by NLCE Möbius condition number `κ ~ 30-80`.
-
-**Other pipelines:**
-
-```bash
-# Force FULL ED everywhere
 qed-nlce --geometry pyrochlore --pipeline full_ed --max_order 5 \
+         --Jxx 1.0 --Jyy 1.0 --Jzz 1.0 --thermo \
          --base_dir output/pyro_full_o5
-
-# Force KPM-DOS everywhere (low-variance trace, large clusters)
-qed-nlce --geometry triangular_site --pipeline kpm_dos --max_order 8 \
-         --kpm_moments 2048 --kpm_random_vectors 20 --thermo \
-         --base_dir output/tri_kpm_o8
-
-# Legacy FTLM (kept for back-compat; high noise floor at NLCE order ≥ 6)
-qed-nlce --geometry pyrochlore --pipeline ftlm --max_order 5 \
-         --ftlm_samples 30 --base_dir output/pyro_ftlm_o5
-
-# Lanczos lowest-eigenvalues (for ground-state observables only)
-qed-nlce --geometry pyrochlore --pipeline lanczos_boost --max_order 5 \
-         --base_dir output/pyro_lz_o5
 ```
 
-**Legacy fitter integration** (`qed_nlce/analysis/nlc_fit_triangular.py`)
-accepts `ed_method="AUTO"`, `"KPM_DOS"`, `"FTLM"`, or `"FULL"` in
-`fixed_params`; the `nlce_triangular.py` shim auto-promotes those to
-the matching pipeline.
+Every cluster is solved with the **full eigenvalue spectrum** via
+symmetry-adapted dense diagonalization. Thermodynamics
+(`C(T)`, `E(T)`, `S(T)`, `F(T)`) are computed exactly from that
+spectrum and the per-cluster weights are summed by the NLCE kernel.
 
-## Pipelines
+## Pipeline
 
-| Pipeline | Per-cluster ED | Best for | Notes |
-| --- | --- | --- | --- |
-| `auto` | FULL ↔ KPM-DOS (crossover at `--auto_full_hilbert`) | **Production runs at orders ≥ 6** | Smart default; orthogonal `--auto_fixed_sz` and `--auto_streaming_symmetry` axes. |
-| `full_ed` | LAPACK dense ED, all eigenvalues | Small clusters / orders ≤ 5 | Noise-free anchor; cost `O(D^3)`. |
-| `kpm_dos` | KPM Chebyshev moments + Hutchinson trace + Cheb-Gauss quadrature | Large clusters (`N ≥ 14`) | C++ kernel `ed::kpm_dos`. Variance `1/√(R·D)`. |
-| `ftlm` | Finite-Temperature Lanczos | Legacy; large `D` with low memory | `~5%` per-cluster noise floor; Möbius amplifies to `15–40%` on summed `C(T)` at orders ≥ 6. |
-| `lanczos_boost` | Lanczos lowest-`k` eigenvalues | Ground-state observables | No thermo. |
+There is a single, noise-free pipeline: `full_ed`. It diagonalizes
+each cluster Hamiltonian exactly using LAPACK (`scipy.linalg.eigh`),
+after blocking the Hilbert space by every available symmetry. Cost is
+`O(D_block^3)` summed over the (much smaller) symmetry blocks rather
+than `O(D^3)` on the full space.
 
-### `auto` pipeline knobs
+## Symmetry blocking
 
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--auto_backend {kpm_dos,ftlm}` | `kpm_dos` | Iterative backend used above the FULL-ED ceiling. |
-| `--auto_full_hilbert N` | `16384` (`2**14`) | FULL-ED ceiling on full Hilbert-space dim. |
-| `--auto_kpm_moments M` | `2048` | KPM Chebyshev moments. |
-| `--auto_kpm_random_vectors R` | `20` | KPM Hutchinson random-vector count. |
-| `--auto_kpm_kernel {jackson,lorentz}` | `jackson` | KPM smoothing kernel. |
-| `--auto_kpm_seed S` | `0` | Seed for Hutchinson vectors (0 = nondeterministic). |
-| `--auto_min_samples`, `--auto_max_samples` | `40, 200` | Adaptive sample range, only used when `--auto_backend=ftlm`. |
-| `--auto_fixed_sz` | off | Append `_FIXED_SZ` to every cluster's method (currently a single-Sz-block trace; **only physically correct if you know your model conserves Sz_total *and* you want the partial trace** — full-physical thermo with sector summing is not yet wired). |
-| `--auto_streaming_symmetry` | off | Cluster-automorphism orbit-basis decomposition (cached per cluster). |
+The solver exhausts every symmetry the Hamiltonian admits, in this
+order (each reduction provably preserves the full eigenvalue
+multiset):
 
-### Symmetry & U(1) Sz blocking
+1. **U(1) total-`S^z` sectors** — applied whenever the Hamiltonian
+   conserves `S^z_total` (auto-detected from the operator terms).
+2. **Spatial automorphisms** — the geometric symmetry group of the
+   cluster graph (respecting complex bond phases) is reduced to a
+   maximal abelian subgroup, and the Hilbert space is decomposed into
+   momentum/character orbit blocks.
+3. **Spin-flip Z2** — when the Hamiltonian is invariant under the
+   global spin flip (auto-detected; broken by a longitudinal field),
+   conjugate `S^z` sectors are merged and split by flip parity.
+4. **Reality / time-reversal** — blocks with no residual imaginary
+   part are diagonalized with the real symmetric LAPACK path.
 
-Two orthogonal axes for shrinking the per-cluster Hilbert space:
+All symmetry reductions are added back together by the framework, so
+the summed spectrum is identical to brute-force dense ED. This is what
+lets the workflow reach higher NLCE order: e.g. for the `N = 12`
+Heisenberg ring the largest dense block shrinks from `4096` to `66`.
 
-* **`--auto_streaming_symmetry`** — exploit the geometric automorphism
-  group of each cluster (lattice symmetries). Adds a one-time orbit-
-  basis construction per cluster (cached under the cluster's ham
-  dir as `basis_cache/`). **Always physically correct** — symmetry
-  sectors are added back together by the framework.
+```python
+from qed_nlce.ed import solve_spectrum, SpinHalfOperator, OP_SP, OP_SM, OP_SZ
 
-* **`--auto_fixed_sz`** — assert the Hamiltonian conserves
-  `S^z_total`. Routes every cluster through the dispatcher with
-  `params.use_fixed_sz = True`, which currently selects the *single*
-  `Sz = 0` block in the C++ backend. **This is a partial trace** —
-  use only when:
+op = SpinHalfOperator(12)
+for i in range(12):
+    j = (i + 1) % 12
+    op.add_two(OP_SZ, i, OP_SZ, j, 1.0)
+    op.add_two(OP_SP, i, OP_SM, j, 0.5)
+    op.add_two(OP_SM, i, OP_SP, j, 0.5)
 
-  1. Your model has no transverse field (`h_x`, `h_y`) and no Sx/Sy
-     single-site or anisotropic xy terms — i.e. it actually commutes
-     with `S^z_total`. (Pure Heisenberg / XXZ / Ising fit; transverse
-     field, DM interactions, Kitaev terms break this.)
-  2. You explicitly want the `Sz = 0` partial trace (e.g. you are
-     studying a magnetization plateau or restricting to a specific
-     sector). For full unconstrained thermo, leave this off.
-
-  Auto-detection of U(1)-Sz from `InterAll.dat` is on the roadmap;
-  for now it is an explicit user assertion.
-
-```bash
-# Heisenberg model with full geometric symmetry, all Sz sectors:
-qed-nlce --geometry triangular_site --pipeline auto --max_order 8 \
-         --J1 1.0 --thermo --auto_streaming_symmetry \
-         --base_dir output/tri_auto_sym_o8
-
-# Same model, restricted to Sz = 0 sector (single-block trace):
-qed-nlce --geometry triangular_site --pipeline auto --max_order 8 \
-         --J1 1.0 --thermo --auto_streaming_symmetry --auto_fixed_sz \
-         --base_dir output/tri_auto_sym_sz0_o8
+spectrum = solve_spectrum(op, use_symmetry=True)   # full spectrum, symmetry-adapted
 ```
 
 ## Backend
 
-Every cluster is diagonalized in-process by importing `qed` and
-dispatching through the canonical three-verb Python surface
-(`qed.solve` for ground-state lanes / `qed.thermal` for FTLM,
-LTLM, KPM-DOS, mTPQ, cTPQ). This eliminates the per-cluster fork +
-OpenMP / CUDA initialization overhead that dominates wall-time at
-high NLCE orders.
-
-MPI-only methods (`SCALAPACK`, `SCALAPACK_MIXED`, `mTPQ_MPI`) are
-**not** supported by the in-process backend — a Python interpreter
-cannot call `MPI_Init`. If you need them, run the standalone
-`ed_distributed_main` (or the legacy `./ED`) directly under
-`mpiexec`. `qed-nlce`'s preflight check rejects MPI methods up front
-with a clear error message.
-
-The legacy CLI flags `--ed_executable`, `--no_in_process`,
-`--in_process`, `--auto_in_process` are silently accepted for
-back-compat but ignored.
+Every cluster is diagonalized in-process by the dense core in
+`qed_nlce.core.dense_ed` → `qed_nlce.ed.solve_spectrum`. There is no
+subprocess fork, no MPI, no GPU. Results are written to
+`<ed_dir>/cluster_{id}_order_{o}/output/ed_results.h5` with the full
+sorted spectrum under `/eigendata/eigenvalues` and (optionally)
+thermodynamics under `/thermodynamics/`.
 
 ## Package layout
 
 | Module | Purpose |
 | --- | --- |
-| `qed_nlce.core` | `Geometry` / `Pipeline` abstractions, `NLCEWorkflow` orchestrator, in-process ED bridge (`EDOptions`, `run_ed_in_process`, `can_run_in_process`). |
+| `qed_nlce.ed` | Self-contained dense ED core: `SpinHalfOperator`, symmetry analysis, `solve_spectrum`, `thermodynamics`, HDF5/`Trans.dat` I/O. |
+| `qed_nlce.hamiltonians` | Cluster file reader + pyrochlore / triangular operator builders. |
+| `qed_nlce.core` | `Geometry` / `Pipeline` abstractions, `NLCEWorkflow` orchestrator, in-process dense bridge (`run_ed_in_process`, `can_run_in_process`). |
 | `qed_nlce.geometries` | Concrete lattices: `pyrochlore`, `triangular_site`, `triangular_triangle`. |
-| `qed_nlce.pipelines` | ED strategies: `auto`, `full_ed`, `kpm_dos`, `lanczos_boost`, `ftlm`. |
+| `qed_nlce.pipelines` | The `full_ed` dense pipeline. |
 | `qed_nlce.prep` | Cluster generators (graph enumeration). |
-| `qed_nlce.run` | NLCE summation kernels + legacy per-lattice driver scripts. |
+| `qed_nlce.run` | NLCE summation kernels + per-lattice driver scripts. |
 | `qed_nlce.analysis` | Convergence diagnostics, fitting drivers, plot helpers. |
 | `qed_nlce.cli` / `qed_nlce.__main__` | Unified `qed-nlce` CLI. |
 
-## Relationship to QED
+## Benchmark
 
-`qed_nlce` depends on QED purely through the `qed` Python package (a
-required runtime dependency, declared in `pyproject.toml`). Every
-cluster's ED is dispatched in-process via QED's canonical three-verb
-Python surface (`qed.solve` / `qed.thermal` / `qed.spectral`), which
-internally routes through the Phase 7+ 5-axis dispatcher (orthogonal
-`use_gpu` / `use_mpi` / `use_fixed_sz` / `use_symmetry` axes).
+`scripts/benchmark_symmetry.py` times symmetry-adapted dense ED
+against plain dense ED across Heisenberg-ring sizes and verifies the
+two spectra agree to machine precision:
 
-`qed_nlce` does **not** link against any QED C++ library, does **not**
-have a build-time dependency on QED, and does **not** invoke the
-`./ED` binary as a subprocess.
-
-Build-introspection preflight uses `qed.has_cuda_build()` /
-`qed.has_mpi_build()` to abort early when the requested method is
-incompatible with the installed `qed` build (e.g. asking for a `*_GPU`
-method against a CPU-only build).
+```bash
+python scripts/benchmark_symmetry.py --max-n 12
+```
 
 ## License
 
-Same as the QED project — see `LICENSE`.
+See `LICENSE`.

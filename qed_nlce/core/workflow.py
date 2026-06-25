@@ -38,7 +38,7 @@ import sys
 from dataclasses import dataclass
 from typing import Optional
 
-from .qed_backend import can_run_in_process, run_ed_in_process
+from .dense_ed import can_run_in_process, run_ed_in_process
 from .cache import EigenvalueCache, SubclusterCache, default_cache_dir
 from .ed_runner import EDOptions
 from .geometry import Geometry
@@ -355,27 +355,10 @@ class NLCEWorkflow:
     def _step3_ed(self, clusters: list[ClusterEntry]) -> None:
         logging.info("=" * 80)
         logging.info(
-            "Step 3: Exact diagonalization in-process via `import qed` "
-            "(pipeline=%s)", self.pipeline.name,
+            "Step 3: Full dense exact diagonalization in-process "
+            "(symmetry-adapted; pipeline=%s)", self.pipeline.name,
         )
         logging.info("=" * 80)
-
-        # Sz auto-detection: probe the first cluster's Hamiltonian once
-        # and set a flag that make_ed_options can read.
-        if (
-            getattr(self.args, "auto_sz_detect", False)
-            and not getattr(self.args, "no_auto_sz_detect", False)
-            and not getattr(self.args, "auto_fixed_sz", False)
-            and not getattr(self.args, "auto_sz_decomposed", False)
-        ):
-            from qed_nlce.pipelines.auto_hybrid import _interall_conserves_sz
-            sample_ham = self._ham_subdir_for(clusters[0])
-            if os.path.isdir(sample_ham) and _interall_conserves_sz(sample_ham):
-                logging.info(
-                    "Sz auto-detect: model conserves S^z_total → enabling "
-                    "Sz-decomposed dispatch (all sectors, full Z)."
-                )
-                self.args.auto_sz_decomposed = True
 
         jobs: list[tuple[ClusterEntry, _EDPayload]] = []
         for cluster in clusters:

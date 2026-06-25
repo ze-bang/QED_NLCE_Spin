@@ -228,44 +228,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     # the FullED summation dispatch).
     args.geometry = pre_args.geometry
 
-    _preflight_build_introspection(args)
-
     workflow = NLCEWorkflow(geometry, pipeline, args)
     workflow.run()
     return 0
-
-
-def _preflight_build_introspection(args: argparse.Namespace) -> None:
-    """Warn or abort early if the user's method requires QED features
-    that the installed ``qed`` build cannot provide. The ED step runs
-    fully in-process (``import qed``); MPI-only methods are not
-    supported and are rejected here.
-    """
-    import qed  # required dep
-
-    method = (getattr(args, "method", "") or "").upper()
-    use_gpu_flag = bool(getattr(args, "use_gpu", False))
-    wants_gpu = use_gpu_flag or method.endswith("_GPU") or method == "MTPQ_CUDA"
-    wants_mpi = method.startswith("SCALAPACK") or method == "MTPQ_MPI"
-
-    if wants_mpi:
-        print(
-            f"error: method '{method}' requires MPI, which the in-process "
-            "qed backend cannot host (a Python interpreter cannot call "
-            "MPI_Init). Pick a non-MPI method (FULL, LANCZOS, FTLM, "
-            "mTPQ, ...).",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-
-    if wants_gpu and not qed.has_cuda_build():
-        print(
-            f"error: method '{method}' requires CUDA, but the installed "
-            "`qed` build has no CUDA support (qed.has_cuda_build() == "
-            "False). Reinstall qed with CUDA enabled or pick a CPU method.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
 
 
 if __name__ == "__main__":

@@ -320,7 +320,7 @@ class CacheStats:
 class EigenvalueCache:
     """Content-addressed cache of per-cluster ED outputs.
 
-    Usage pattern (see :func:`qed_nlce.core.qed_backend.run_ed_in_process`):
+    Usage pattern (see :func:`qed_nlce.core.dense_ed.run_ed_in_process`):
 
       1. ``key = cache.compute_key(geometry, ham_subdir, cluster_file, options, num_sites)``
       2. ``if cache.lookup(key, output_dir): return True``

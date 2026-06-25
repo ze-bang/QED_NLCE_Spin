@@ -25,6 +25,8 @@ import subprocess
 import sys
 
 from ..core import Geometry, register_geometry
+from ..ed.io import write_operator, write_site_info
+from ..hamiltonians import build_triangular_operator, read_cluster_file
 from . import _paths
 
 
@@ -70,86 +72,49 @@ def _add_triangular_arguments(parser: argparse.ArgumentParser) -> None:
 
 def _run_triangular_helper(args: argparse.Namespace, cluster_file_path: str,
                            ham_subdir: str, cluster_id: int) -> bool:
-    cmd = [
-        sys.executable,
-        _paths.TRIANGULAR_HELPER,
-        "--J1", str(args.J1),
-        "--J2", str(args.J2),
-        "--h", str(args.h),
-        "--field_dir", str(args.field_dir[0]), str(args.field_dir[1]), str(args.field_dir[2]),
-        "--output_dir", ham_subdir,
-        "--cluster_file", cluster_file_path,
-        "--model", args.model,
-        "--Jz_ratio", str(args.Jz_ratio),
-    ]
-    if args.Jzz is not None:
-        cmd += ["--Jzz", str(args.Jzz)]
-    if args.Jpm is not None:
-        cmd += ["--Jpm", str(args.Jpm)]
-    if args.Jpmpm is not None:
-        cmd += ["--Jpmpm", str(args.Jpmpm)]
-    if args.Jzpm is not None:
-        cmd += ["--Jzpm", str(args.Jzpm)]
-    if args.Gamma is not None:
-        cmd += ["--Gamma", str(args.Gamma)]
-    if args.Gamma_prime is not None:
-        cmd += ["--Gamma_prime", str(args.Gamma_prime)]
-    cmd += ["--g_ab", str(args.g_ab), "--g_c", str(args.g_c)]
+    """Build the per-cluster triangular Hamiltonian in-memory and persist
+    it as ``Trans.dat`` / ``InterAll.dat`` (+ a site-info stub)."""
     try:
-        subprocess.run(cmd, check=True, capture_output=True)
-        return True
-    except subprocess.CalledProcessError as e:
-        logging.error(
-            "helper_cluster_triangular.py failed for cluster %d: %s",
-            cluster_id, e,
+        cluster = read_cluster_file(cluster_file_path)
+        op = build_triangular_operator(
+            cluster,
+            J1=args.J1,
+            J2=args.J2,
+            Jz_ratio=args.Jz_ratio,
+            h=args.h,
+            field_dir=tuple(args.field_dir),
+            model=args.model,
+            Jzz=args.Jzz,
+            Jpm=args.Jpm,
+            Jpmpm=args.Jpmpm,
+            Jzpm=args.Jzpm,
+            Gamma=args.Gamma,
+            Gamma_prime=args.Gamma_prime,
+            g_ab=args.g_ab,
+            g_c=args.g_c,
         )
-        if e.stderr:
-            logging.error("stderr: %s", e.stderr.decode("utf-8", errors="replace"))
+        write_operator(op, ham_subdir)
+        order = getattr(cluster, "order", 0)
+        write_site_info(ham_subdir, cluster_id, order, cluster.n_sites)
+        return True
+    except Exception as e:
+        logging.error(
+            "Hamiltonian build failed for triangular cluster %d: %s",
+            cluster_id, e, exc_info=True,
+        )
         return False
 
 
 def _precompute_basis_for_cluster(
     args: argparse.Namespace, cluster_id: int, order: int, ham_subdir: str,
 ) -> bool:
-    """Run ``./ED --precompute-basis`` once for one cluster."""
-    import glob
-    if not os.path.exists(ham_subdir):
-        logging.warning("Ham dir missing for cluster %d: %s", cluster_id, ham_subdir)
-        return False
+    """No-op retained for API compatibility.
 
-    basis_cache = os.path.join(ham_subdir, "basis_cache")
-    if os.path.isdir(basis_cache) and glob.glob(os.path.join(basis_cache, "*.h5")):
-        return True  # already cached
-
-    site_info = glob.glob(os.path.join(ham_subdir, "*_site_info.dat"))
-    if not site_info:
-        logging.warning("No site info file in %s", ham_subdir)
-        return False
-    num_sites = 0
-    with open(site_info[0]) as f:
-        for line in f:
-            if not line.startswith("#") and line.strip():
-                num_sites += 1
-
-    cmd = [
-        args.ed_executable,
-        ham_subdir,
-        "--precompute-basis",
-        f"--num_sites={num_sites}",
-        "--spin_length=0.5",
-    ]
-    env = os.environ.copy()
-    env["ED_PYTHON"] = sys.executable
-    if num_sites <= 8:
-        env["OMP_NUM_THREADS"] = "1"
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, env=env)
-        return True
-    except subprocess.CalledProcessError as e:
-        logging.error("Basis precompute failed for cluster %d: %s", cluster_id, e)
-        if e.stderr:
-            logging.error("stderr: %s", e.stderr.decode("utf-8", errors="replace"))
-        return False
+    The self-contained dense solver discovers and exploits all spatial
+    automorphisms (plus U(1) S^z and spin-flip Z2) internally at solve
+    time, so there is no separate orbit-basis precompute step.
+    """
+    return True
 
 
 @register_geometry

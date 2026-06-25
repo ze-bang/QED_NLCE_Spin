@@ -28,9 +28,8 @@ research code is expected to subclass against:
 """
 
 from .ed_runner import EDOptions
-from .qed_backend import (
+from .dense_ed import (
     can_run_in_process,
-    qed_available,
     run_ed_in_process,
 )
 from .cache import (
@@ -57,9 +56,8 @@ from .workflow import NLCEWorkflow
 __all__ = [
     # ed_runner
     "EDOptions",
-    # qed_backend (in-process)
+    # dense_ed (in-process)
     "can_run_in_process",
-    "qed_available",
     "run_ed_in_process",
     # cache
     "EigenvalueCache",

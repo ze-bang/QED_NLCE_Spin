@@ -19,6 +19,8 @@ import subprocess
 import sys
 
 from ..core import Geometry, register_geometry
+from ..ed.io import write_operator, write_site_info
+from ..hamiltonians import build_pyrochlore_operator, read_cluster_file
 from . import _paths
 
 
@@ -84,30 +86,27 @@ class Pyrochlore(Geometry):
         cluster_file_path: str,
         ham_subdir: str,
     ) -> bool:
-        cmd = [
-            sys.executable,
-            _paths.PYROCHLORE_HELPER,
-            str(args.Jxx),
-            str(args.Jyy),
-            str(args.Jzz),
-            str(args.h),
-            str(args.field_dir[0]),
-            str(args.field_dir[1]),
-            str(args.field_dir[2]),
-            ham_subdir,
-            cluster_file_path,
-            str(args.random_field_width),
-        ]
-        try:
-            subprocess.run(cmd, check=True, capture_output=True)
-            return True
-        except subprocess.CalledProcessError as e:
-            logging.error(
-                "helper_cluster.py failed for cluster %d: %s",
-                cluster_id, e,
+        if getattr(args, "random_field_width", 0.0):
+            raise NotImplementedError(
+                "random_field_width is not supported by the self-contained "
+                "dense core; run with --random_field_width 0."
             )
-            if e.stdout:
-                logging.error("stdout: %s", e.stdout.decode("utf-8", errors="replace"))
-            if e.stderr:
-                logging.error("stderr: %s", e.stderr.decode("utf-8", errors="replace"))
+        try:
+            cluster = read_cluster_file(cluster_file_path)
+            op = build_pyrochlore_operator(
+                cluster,
+                Jxx=args.Jxx,
+                Jyy=args.Jyy,
+                Jzz=args.Jzz,
+                h=args.h,
+                field_dir=tuple(args.field_dir),
+            )
+            write_operator(op, ham_subdir)
+            write_site_info(ham_subdir, cluster_id, order, cluster.n_sites)
+            return True
+        except Exception as e:
+            logging.error(
+                "Hamiltonian build failed for pyrochlore cluster %d: %s",
+                cluster_id, e, exc_info=True,
+            )
             return False

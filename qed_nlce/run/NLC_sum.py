@@ -395,22 +395,34 @@ class NLCExpansion:
         Returns:
             Dictionary mapping subcluster_id to its multiplicity in this cluster
         """
-        # Try to use subcluster info if available
-        if hasattr(self, 'subcluster_info') and cluster_id in self.subcluster_info:
+        # Explicit subcluster multiplicities (Y_cs) are mandatory for a
+        # correct NLCE sum: there is no sound way to reconstruct them from
+        # cluster orders alone (same-order subclusters, repeated topologies,
+        # and non-unit multiplicities are all lost). We therefore refuse to
+        # guess -- a missing/incomplete subclusters_info.txt is a hard error
+        # rather than a silently wrong answer.
+        if not getattr(self, 'subcluster_info', None):
+            raise RuntimeError(
+                "Subcluster information is unavailable. Generate "
+                "'subclusters_info.txt' (the cluster-prep step writes it into "
+                f"the cluster directory '{self.cluster_dir}') before summing; "
+                "NLCE weights cannot be computed without explicit Y_cs "
+                "multiplicities."
+            )
+
+        if cluster_id in self.subcluster_info:
             return self.subcluster_info[cluster_id]['subclusters']
-        
-        # Fallback to simple heuristic based on order
-        # NOTE: This is a rough approximation and may miss same-order subclusters
-        # For accurate NLCE, always use explicit subcluster info from subclusters_info.txt
-        subclusters = {}
-        order = self.clusters[cluster_id]['order']
-        for cid, data in self.clusters.items():
-            # Include all clusters of strictly lower order
-            # Same-order subclusters require explicit subcluster info
-            if data['order'] < order:
-                subclusters[cid] = 1  # Assume multiplicity 1 as a fallback
-                
-        return subclusters
+
+        # The file was loaded but this cluster is absent. Order-1 clusters
+        # legitimately have no subclusters; anything larger means the file is
+        # incomplete and the recursion would be wrong.
+        if self.clusters[cluster_id]['order'] <= 1:
+            return {}
+        raise RuntimeError(
+            f"Cluster {cluster_id} (order {self.clusters[cluster_id]['order']}) "
+            "is missing from subclusters_info.txt; its NLCE weight cannot be "
+            "computed. Regenerate the subcluster table for this cluster set."
+        )
     
     def _topological_sort_clusters(self):
         """

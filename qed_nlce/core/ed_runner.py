@@ -3,7 +3,7 @@
 This module used to host the ``./ED`` subprocess bridge
 (``build_ed_command``, ``run_ed_subprocess``, binary discovery).
 Those have been removed: every NLCE pipeline now runs ED in-process
-through :mod:`qed_nlce.core.qed_backend`, which dispatches each
+through :mod:`qed_nlce.core.dense_ed`, which dispatches each
 cluster through the canonical ``qed.solve(H, ...)`` /
 ``qed.thermal(H, ...)`` Python verbs. What remains is the
 :class:`EDOptions` dataclass that pipelines populate per cluster and
