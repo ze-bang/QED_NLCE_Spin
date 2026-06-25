@@ -4,9 +4,16 @@ The single public entry point :func:`solve_spectrum` returns the full
 list of energy eigenvalues of a :class:`~qed_nlce.ed.operator.SpinHalfOperator`.
 It block-diagonalizes the Hamiltonian using
 
-  1. **U(1) total-S^z** sectors (when the operator conserves S^z), and
+  1. **U(1) total-S^z** sectors when ``S^z`` is conserved, or -- when only
+     ``S^+ S^+`` / ``S^- S^-`` pair terms break it -- the residual
+     **up-spin-parity Z2** sectors,
   2. a **spatial automorphism** symmetry-adapted (orbit/representative)
-     basis inside each sector,
+     basis inside each sector, and
+  3. **antiunitary time reversal** ``T = U_F K`` (``T^2 = +1``) for the
+     genuinely complex, ``S^z``-broken case (e.g. non-Kramers quantum spin
+     ice): each ``T``-invariant sector is rotated into a real basis (real
+     LAPACK path), or two ``T``-swapped equal-size sectors are recognised as
+     isospectral and only one is diagonalised.
 
 then diagonalizes every (much smaller) block with
 :func:`scipy.linalg.eigh` (``eigvals_only=True``). scipy's default
@@ -36,6 +43,7 @@ from .symmetry import (
     AbelianGroup,
     act_state,
     detect_spin_flip,
+    detect_time_reversal,
     find_automorphisms,
     maximal_abelian_subgroup,
 )
@@ -58,15 +66,25 @@ class SymmetryReport:
     abelian_factor_orders: tuple
     num_blocks: int
     largest_block: int
+    sz_parity: bool = False
+    time_reversal: bool = False
+    num_real_blocks: int = 0
 
     def __str__(self) -> str:
+        if self.sz_conserved:
+            grading = f"Sz=on({self.num_sz_sectors} sectors)"
+        elif self.sz_parity:
+            grading = f"Sz=off Sz-parity=on({self.num_sz_sectors} sectors)"
+        else:
+            grading = "Sz=off"
+        tr = ""
+        if self.time_reversal:
+            tr = f" T=on(real_blocks={self.num_real_blocks})"
         return (
-            f"N={self.num_sites} dim={self.full_dim} "
-            f"Sz={'on' if self.sz_conserved else 'off'}"
-            f"({self.num_sz_sectors} sectors) "
+            f"N={self.num_sites} dim={self.full_dim} {grading} "
             f"|Aut|={self.automorphism_order} "
             f"|Abelian|={self.abelian_order}{self.abelian_factor_orders} "
-            f"blocks={self.num_blocks} largest={self.largest_block}"
+            f"blocks={self.num_blocks} largest={self.largest_block}{tr}"
         )
 
 
@@ -80,6 +98,7 @@ def solve_spectrum(
     *,
     use_symmetry: bool = True,
     use_spin_flip: bool = True,
+    use_time_reversal: bool = True,
     precomputed_group: Optional[AbelianGroup] = None,
     return_report: bool = False,
 ):
@@ -94,6 +113,24 @@ def solve_spectrum(
         When True (and the operator is spin-flip invariant) the global
         ``S^z -> -S^z`` Z2 is added to the symmetry group, pairing the
         magnetisation sectors ``m`` and ``N-m``.
+    use_time_reversal:
+        When True (and the operator is time-reversal invariant) two extra
+        reductions are exploited *when full ``U(1)`` is broken*:
+
+        * **Sz-parity Z2** -- if every term changes ``S^z`` by an even
+          amount (``S^+ S^+`` / ``S^- S^-`` pair terms only), the Hilbert
+          space splits into even/odd up-spin-parity sectors.
+        * **Antiunitary time reversal** ``T = U_F K`` -- with ``T^2 = +1``
+          (non-Kramers) each ``T``-invariant sector is rotated into a real
+          basis and diagonalised with the real-symmetric LAPACK path; when
+          ``T`` instead swaps two equal-size sectors they are isospectral
+          and only one is diagonalised. Both apply to the genuinely complex
+          (e.g. non-Kramers quantum-spin-ice ``J_{+-}``) Hamiltonians where
+          the unitary spin flip and z-basis reality are *broken*.
+
+        These extra reductions are currently taken only when the spatial
+        automorphism group is trivial (the regime where they matter most);
+        a non-trivial spatial group keeps the existing complex orbit blocks.
     precomputed_group:
         A spatial :class:`AbelianGroup` computed once for this cluster
         geometry. When ``None`` it is detected from ``op``. A group whose
@@ -129,21 +166,69 @@ def solve_spectrum(
         aut_order = len(autos)
     has_flip = any(flip for _perm, flip in group.elements)
 
-    # Build the list of invariant subspaces. When the group contains a
-    # spin flip and Sz is conserved, each subspace pairs sectors m & N-m.
+    # Antiunitary time reversal (only useful once full U(1) is broken).
+    t_rev = (
+        use_time_reversal and not sz_ok and detect_time_reversal(op)
+    )
+
+    # Choose the invariant subspaces and the time-reversal policy.
+    #   realify          : rotate each (trivial-group) sector into a real
+    #                      basis via T, then use the real LAPACK path.
+    #   pair_sectors_by_T: T maps sector 0 <-> sector 1 bijectively, so they
+    #                      are isospectral -- diagonalise one, mirror it.
+    realify = False
+    pair_sectors_by_T = False
     if sz_ok:
         sectors = _sz_pair_sectors(n) if has_flip else _sz_sectors(n)
+    elif op.conserves_sz_parity() and not (has_flip and n % 2 == 1):
+        # Spatial permutations preserve up-spin parity; the spin flip does
+        # too iff N is even. (The excluded N-odd-with-flip case falls back to
+        # the full space, which is still correct.)
+        sectors = _parity_sectors(n)
+        if t_rev:
+            # T (= bit complement) preserves a parity sector iff N is even,
+            # otherwise it swaps the two equal-size sectors.
+            realify = n % 2 == 0
+            pair_sectors_by_T = n % 2 == 1
     else:
         sectors = [np.arange(full_dim, dtype=np.int64)]
+        if t_rev:
+            realify = True  # T maps s <-> complement(s) within the full space
 
     all_evals: list[np.ndarray] = []
     num_blocks = 0
+    num_real = 0
     largest = 0
-    for states in sectors:
-        for block in _sector_blocks(op, states, group):
+    prev_evals: Optional[np.ndarray] = None
+    for si, states in enumerate(sectors):
+        if pair_sectors_by_T and si > 0:
+            # T-image of sector 0: identical spectrum, no diagonalisation.
+            assert prev_evals is not None and len(states) == prev_evals.shape[0]
+            all_evals.append(prev_evals)
+            continue
+        sector_evals: list[np.ndarray] = []
+        if realify and group.size == 1:
+            index_of = {int(s): i for i, s in enumerate(states)}
+            block = op.matrix_on_basis(states, index_of)
+            block = _realify_block(block, states, n)
             num_blocks += 1
+            num_real += 1
             largest = max(largest, block.shape[0])
-            all_evals.append(_eigh_block(block))
+            sector_evals.append(sla.eigh(block, eigvals_only=True))
+        else:
+            for block in _sector_blocks(op, states, group):
+                num_blocks += 1
+                if not np.iscomplexobj(block) or (
+                    block.size and np.max(np.abs(block.imag)) < _REAL_TOL
+                ):
+                    num_real += 1
+                largest = max(largest, block.shape[0])
+                sector_evals.append(_eigh_block(block))
+        ev = (
+            np.concatenate(sector_evals) if sector_evals else np.zeros(0)
+        )
+        all_evals.append(ev)
+        prev_evals = ev
 
     evals = np.sort(np.concatenate(all_evals)) if all_evals else np.zeros(0)
 
@@ -158,6 +243,9 @@ def solve_spectrum(
             abelian_factor_orders=group.orders,
             num_blocks=num_blocks,
             largest_block=largest,
+            sz_parity=(not sz_ok) and op.conserves_sz_parity(),
+            time_reversal=t_rev,
+            num_real_blocks=num_real,
         )
         return evals, rep
     return evals
@@ -197,6 +285,84 @@ def _sz_pair_sectors(n: int) -> list[np.ndarray]:
             if buckets[m]:
                 out.append(np.array(buckets[m], dtype=np.int64))
     return out
+
+
+def _parity_sectors(n: int) -> list[np.ndarray]:
+    """Partition the computational basis by up-spin parity (popcount mod 2).
+
+    The residual ``Z2`` grading that survives when full ``U(1)`` is broken
+    only by even-``Delta S^z`` (``S^+ S^+`` / ``S^- S^-``) terms.
+    """
+    buckets: list[list[int]] = [[], []]
+    for s in range(1 << n):
+        buckets[bin(s).count("1") & 1].append(s)
+    return [np.array(b, dtype=np.int64) for b in buckets if b]
+
+
+def _realify_block(H: np.ndarray, states: np.ndarray, n: int) -> np.ndarray:
+    """Rotate a complex Hermitian block into a real-symmetric one using the
+    antiunitary time reversal ``T = U_F K`` (``T^2 = +1``).
+
+    ``T`` acts on the computational basis as the bit complement,
+    ``T|s> = |comp(s)>`` (``U_F`` flips every spin, ``K`` is trivial on the
+    real basis kets). On the orthonormal ``T``-invariant pair basis
+
+        e1 = (|s> + |s_bar>)/sqrt2 ,   e2 = -i(|s> - |s_bar>)/sqrt2
+
+    (one pair per ``{s, s_bar}``) every matrix element ``<e_a|H|e_b>`` is
+    real because ``[T, H] = 0`` and ``T e = e``. The change of basis is the
+    sparse unitary ``W`` (two non-zeros per column), so ``W^dagger H W`` is
+    formed in ``O(D^2)`` by combining columns then rows -- no dense matmul.
+
+    ``states`` must be closed under complementation (every ``s_bar`` present);
+    this holds for the full space and, when ``N`` is even, for each up-spin
+    parity sector. The residual imaginary part is asserted to be at numerical
+    zero (a non-zero value would mean ``T`` is not actually a symmetry).
+    """
+    comp = (1 << n) - 1
+    index_of = {int(s): i for i, s in enumerate(states)}
+    D = len(states)
+    if D % 2 != 0:
+        raise ValueError("realification needs an even-dimensional subspace")
+    seen = np.zeros(D, dtype=bool)
+    I = np.empty(D // 2, dtype=np.int64)
+    J = np.empty(D // 2, dtype=np.int64)
+    p = 0
+    for i in range(D):
+        if seen[i]:
+            continue
+        j = index_of.get(int(states[i]) ^ comp)
+        if j is None:
+            raise ValueError(
+                "time-reversal realification requires a complement-closed "
+                "subspace"
+            )
+        if j == i:
+            raise ValueError("realification: unexpected self-conjugate state")
+        I[p] = i
+        J[p] = j
+        seen[i] = True
+        seen[j] = True
+        p += 1
+    r = 1.0 / math.sqrt(2.0)
+
+    # HW: columns in pair order, even col = e1, odd col = e2.
+    HW = np.empty((D, D), dtype=np.complex128)
+    HW[:, 0::2] = (H[:, I] + H[:, J]) * r
+    HW[:, 1::2] = (H[:, J] - H[:, I]) * (1j * r)
+    # W^dagger (HW): rows in pair order, even row = e1, odd row = e2.
+    out = np.empty((D, D), dtype=np.complex128)
+    out[0::2, :] = (HW[I, :] + HW[J, :]) * r
+    out[1::2, :] = (HW[I, :] - HW[J, :]) * (1j * r)
+
+    max_imag = float(np.max(np.abs(out.imag))) if out.size else 0.0
+    scale = 1.0 + (float(np.max(np.abs(out.real))) if out.size else 0.0)
+    if max_imag > 1e-7 * scale:
+        raise ValueError(
+            f"time-reversal realification left residual imaginary part "
+            f"{max_imag:.2e} (operator is not T-symmetric?)"
+        )
+    return np.ascontiguousarray(out.real)
 
 
 def _eigh_block(block: np.ndarray) -> np.ndarray:

@@ -87,6 +87,25 @@ class SpinHalfOperator:
                 return False
         return True
 
+    def conserves_sz_parity(self) -> bool:
+        """True iff every term changes total ``S^z`` by an *even* amount.
+
+        This is the residual ``Z2`` grading (parity of the number of
+        up-spins) that survives when full ``U(1)`` is broken only by
+        ``S^+ S^+`` / ``S^- S^-`` pair terms -- e.g. the ``J_{\\pm\\pm}``
+        term of (non-)Kramers quantum spin ice. A single-site ladder
+        operator or a transverse (``S^x``/``S^y``) field changes ``S^z``
+        by an odd amount and breaks it. Always ``True`` when
+        :meth:`conserves_sz` is.
+        """
+        for op, _site, _c in self.single:
+            if _delta_m(op) % 2 != 0:
+                return False
+        for op1, _s1, op2, _s2, _c in self.two:
+            if (_delta_m(op1) + _delta_m(op2)) % 2 != 0:
+                return False
+        return True
+
     def is_real_in_z_basis(self) -> bool:
         """True iff the Hamiltonian matrix is real in the S^z basis."""
         for _op, _site, c in self.single:

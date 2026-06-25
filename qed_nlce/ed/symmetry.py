@@ -41,6 +41,7 @@ from .operator import SpinHalfOperator
 __all__ = [
     "find_automorphisms",
     "detect_spin_flip",
+    "detect_time_reversal",
     "build_symmetry_group",
     "AbelianGroup",
     "maximal_abelian_subgroup",
@@ -428,6 +429,39 @@ def detect_spin_flip(op: SpinHalfOperator) -> bool:
         fc = c * _FLIP_SIGN[o1] * _FLIP_SIGN[o2]
         flip[_two_key(_FLIP_OP[o1], s1, _FLIP_OP[o2], s2, fc)] += 1
     return orig == flip
+
+
+def detect_time_reversal(op: SpinHalfOperator) -> bool:
+    """True iff the Hamiltonian commutes with the antiunitary time reversal
+    ``T = U_F · K``.
+
+    Here ``U_F`` is the unitary global spin flip (``S^z -> -S^z``,
+    ``S^+ <-> S^-``; the same ``U`` used by :func:`detect_spin_flip`) and
+    ``K`` is complex conjugation in the ``S^z`` basis. Because ``K``
+    conjugates the c-number coefficients, this is exactly the spin-flip
+    test applied to ``conj(H)``::
+
+        T H T^{-1} = U_F (conj H) U_F^{-1}  ==  H  ?
+
+    For real coefficients ``T`` and the unitary spin flip coincide; for a
+    genuinely complex model (e.g. the ``gamma S^+ S^+ + conj(gamma) S^- S^-``
+    pair term of non-Kramers quantum spin ice) the *unitary* flip is broken
+    while ``T`` survives. ``U_F`` is a real permutation (bit complement) and
+    squares to the identity, so ``T^2 = +1`` here -- the non-Kramers case
+    with no protected Kramers degeneracy; the spectrum may be brought to
+    real form rather than forced into degenerate pairs.
+    """
+    orig = Counter()
+    trev = Counter()
+    for o, site, c in op.single:
+        orig[_single_key(o, site, c)] += 1
+        tc = c.conjugate() * _FLIP_SIGN[o]
+        trev[_single_key(_FLIP_OP[o], site, tc)] += 1
+    for o1, s1, o2, s2, c in op.two:
+        orig[_two_key(o1, s1, o2, s2, c)] += 1
+        tc = c.conjugate() * _FLIP_SIGN[o1] * _FLIP_SIGN[o2]
+        trev[_two_key(_FLIP_OP[o1], s1, _FLIP_OP[o2], s2, tc)] += 1
+    return orig == trev
 
 
 def build_symmetry_group(
