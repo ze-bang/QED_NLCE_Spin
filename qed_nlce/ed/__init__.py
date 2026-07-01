@@ -15,6 +15,7 @@ Pure numpy/scipy. No external ``qed`` / ``edlib`` dependency. Provides:
 from .operator import SpinHalfOperator, OP_SP, OP_SM, OP_SZ
 from .dense import solve_spectrum, SymmetryReport
 from .thermo import thermodynamics, ThermoResult
+from .oftlm import oftlm_thermodynamics, spinhalf_to_qed
 from .symmetry import (
     find_automorphisms,
     detect_spin_flip,
@@ -34,6 +35,8 @@ __all__ = [
     "SymmetryReport",
     "thermodynamics",
     "ThermoResult",
+    "oftlm_thermodynamics",
+    "spinhalf_to_qed",
     "find_automorphisms",
     "detect_spin_flip",
     "build_symmetry_group",

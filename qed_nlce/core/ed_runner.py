@@ -43,4 +43,10 @@ class EDOptions:
     basis_cache_dir: Optional[str] = None
     samples: Optional[int] = None
     krylov_dim: Optional[int] = None
+    # Large-cluster OFTLM fallback: clusters whose full Hilbert dimension exceeds
+    # ``oftlm_cutoff`` are handled by matrix-free OFTLM (QED) instead of dense ED.
+    oftlm_cutoff: int = 1 << 15          # 32768 (~15-site full space)
+    oftlm_num_exact: int = 16            # N_V low-lying states treated exactly
+    oftlm_num_samples: int = 20          # R random samples
+    oftlm_krylov_dim: int = 100          # Lanczos steps per sample
     extra_flags: list[str] = field(default_factory=list)

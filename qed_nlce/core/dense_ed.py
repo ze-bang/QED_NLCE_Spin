@@ -32,7 +32,7 @@ try:  # h5py is the on-disk contract with the summation kernels
 except ImportError:  # pragma: no cover
     _HAS_H5PY = False
 
-from ..ed import solve_spectrum, thermodynamics
+from ..ed import solve_spectrum, thermodynamics, oftlm_thermodynamics
 from ..ed.io import read_operator
 from .ed_runner import EDOptions
 
@@ -84,6 +84,37 @@ def _write_results(
             tgrp.create_dataset("free_energy", data=np.asarray(res.free_energy))
 
 
+def _write_thermo_results(
+    out_subdir: str,
+    res,
+    num_sites: int,
+    hilbert_dim: int,
+    method: str = "OFTLM",
+) -> None:
+    """Write ``ed_results.h5`` with ONLY the P(T) thermodynamic curves.
+
+    Used for large clusters solved by OFTLM, which produce thermodynamics
+    directly (no eigenvalue spectrum). The ``/thermodynamics`` group matches
+    the layout :func:`_write_results` writes for dense clusters, so the NLCE
+    summation reads both uniformly.
+    """
+    if not _HAS_H5PY:
+        raise RuntimeError("h5py is required to write ed_results.h5")
+    h5_path = os.path.join(out_subdir, "ed_results.h5")
+    with h5py.File(h5_path, "w") as f:
+        grp = f.create_group("eigendata")
+        grp.attrs["num_eigenvalues"] = 0           # spectrum not materialized
+        grp.attrs["hilbert_dim"] = int(hilbert_dim)
+        grp.attrs["num_sites"] = int(num_sites)
+        grp.attrs["method"] = str(method)
+        tgrp = f.create_group("thermodynamics")
+        tgrp.create_dataset("temperatures", data=np.asarray(res.temperatures))
+        tgrp.create_dataset("energy", data=np.asarray(res.energy))
+        tgrp.create_dataset("specific_heat", data=np.asarray(res.specific_heat))
+        tgrp.create_dataset("entropy", data=np.asarray(res.entropy))
+        tgrp.create_dataset("free_energy", data=np.asarray(res.free_energy))
+
+
 def run_ed_in_process(
     ham_subdir: str,
     output_dir: str,
@@ -124,11 +155,24 @@ def run_ed_in_process(
 
     try:
         op = read_operator(ham_subdir, int(num_sites))
-        evals = solve_spectrum(
-            op,
-            use_symmetry=bool(options.use_symm),
-        )
-        _write_results(out_subdir, evals, int(num_sites), options)
+        hilbert_dim = 1 << int(num_sites)
+        cutoff = int(getattr(options, "oftlm_cutoff", 1 << 15))
+        if hilbert_dim <= cutoff:
+            # Small cluster: full dense diagonalization (exact spectrum).
+            evals = solve_spectrum(op, use_symmetry=bool(options.use_symm))
+            _write_results(out_subdir, evals, int(num_sites), options)
+        else:
+            # Large cluster: matrix-free OFTLM (QED). No eigenvalues -- write the
+            # per-cluster P(T) directly on the shared temperature grid.
+            T = _temperature_grid(options)
+            res = oftlm_thermodynamics(
+                op, T,
+                num_exact=int(getattr(options, "oftlm_num_exact", 16)),
+                num_samples=int(getattr(options, "oftlm_num_samples", 20)),
+                krylov_dim=int(getattr(options, "oftlm_krylov_dim", 100)),
+            )
+            _write_thermo_results(out_subdir, res, int(num_sites),
+                                  hilbert_dim, method="OFTLM")
     except Exception as exc:
         logging.error(
             "[%s] in-process dense ED failed: %s", log_tag, exc, exc_info=True

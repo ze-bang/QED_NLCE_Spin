@@ -155,15 +155,29 @@ class NLCExpansion:
             if HAS_H5PY and os.path.exists(h5_file):
                 try:
                     with h5py.File(h5_file, 'r') as f:
-                        if '/eigendata/eigenvalues' in f:
+                        if ('/eigendata/eigenvalues' in f
+                                and len(f['/eigendata/eigenvalues']) > 0):
                             eigenvalues = f['/eigendata/eigenvalues'][:]
                             self.clusters[cluster_id]['eigenvalues'] = np.array(eigenvalues)
-                            
+
                             # For truncated clusters, calculate energy cutoff
                             if cluster_id in self.truncated_clusters:
                                 E_min = np.min(eigenvalues)
                                 E_max = np.max(eigenvalues)
                                 self.truncated_clusters[cluster_id]['energy_cutoff'] = E_max - E_min
+                            continue
+                        # Large clusters solved by OFTLM carry no eigenvalue
+                        # spectrum -- only the P(T) curves. Read them directly;
+                        # the summation consumes them via _cluster_thermo_quantities.
+                        if '/thermodynamics/temperatures' in f:
+                            tg = f['/thermodynamics']
+                            self.clusters[cluster_id]['thermo_pt'] = {
+                                'temperatures': tg['temperatures'][:],
+                                'energy': tg['energy'][:],
+                                'specific_heat': tg['specific_heat'][:],
+                                'entropy': tg['entropy'][:],
+                            }
+                            self.clusters[cluster_id]['eigenvalues'] = None
                             continue
                 except Exception as e:
                     print(f"Warning: Error reading HDF5 file for cluster {cluster_id}: {e}")
@@ -229,6 +243,32 @@ class NLCExpansion:
                       f"{num_eig}/{dim} eigenvalues ({fraction*100:.1f}%), "
                       f"E_cutoff = {cutoff:.4f}")
     
+    def _cluster_thermo_quantities(self, cluster_id):
+        """Per-cluster {energy, specific_heat, entropy} on ``self.temp_values``.
+
+        Dense clusters: computed from the eigenvalue spectrum. OFTLM clusters
+        (no spectrum): the pre-computed P(T) curves interpolated onto the
+        summation grid (both grids are log-spaced from temp_min/max, so this is
+        near-exact).
+        """
+        ev = self.clusters[cluster_id].get('eigenvalues')
+        if ev is not None:
+            return self.calculate_thermodynamic_quantities(ev)
+        pt = self.clusters[cluster_id].get('thermo_pt')
+        if pt is None:
+            raise ValueError(
+                f"cluster {cluster_id}: neither eigenvalues nor P(T) available")
+        Tc = np.asarray(pt['temperatures'], dtype=float)
+        order = np.argsort(Tc)
+        def _itp(y):
+            return np.interp(self.temp_values, Tc[order],
+                             np.asarray(y, dtype=float)[order])
+        e = _itp(pt['energy']); c = _itp(pt['specific_heat']); s = _itp(pt['entropy'])
+        if self.SI:
+            R = 6.02214076e23 * 1.380649e-23
+            e, c, s = e * R, c * R, s * R
+        return {'energy': e, 'specific_heat': c, 'entropy': s}
+
     def calculate_thermodynamic_quantities(self, eigenvalues):
         """
         Calculate thermodynamic quantities from eigenvalues.
@@ -548,10 +588,9 @@ class NLCExpansion:
                 print(f"    Cannot compute weight because W(c) = P(c) - Σ Y_cs × W(s) requires ALL subcluster weights")
                 continue
                 
-            # Get thermodynamic quantities for this cluster
-            quantities = self.calculate_thermodynamic_quantities(
-                self.clusters[cluster_id]['eigenvalues'],
-            )
+            # Get thermodynamic quantities for this cluster (dense spectrum or
+            # OFTLM P(T) for large clusters).
+            quantities = self._cluster_thermo_quantities(cluster_id)
             
             # Calculate weights for energy and specific heat
             for prop in ['energy', 'specific_heat', 'entropy']:
