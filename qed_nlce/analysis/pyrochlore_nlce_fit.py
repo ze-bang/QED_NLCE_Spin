@@ -211,8 +211,28 @@ class PyrochloreNLCERunner:
         cache_path = cache_path or os.path.join(base_dir, ".nlce_cache.h5")
         self.cache = _ResultCache(cache_path)
 
+        # Per-process working root + cache. Parallel DE workers are separate
+        # processes; each gets ``base_dir/w<pid>`` so their cluster/ED/result
+        # trees and HDF5 caches never clobber one another. Set lazily on first
+        # ``run()`` in each process (see ``_worker_dir``).
+        self._active_base = self.base_dir
+        self._wd_pid = None
+
         # Persistent cluster + Hamiltonian directories (reused across calls).
         os.makedirs(self.base_dir, exist_ok=True)
+
+    def _worker_dir(self) -> str:
+        """Return this process's isolated working directory (``base_dir/w<pid>``),
+        (re)binding the result cache to it the first time each process calls in."""
+        pid = os.getpid()
+        if self._wd_pid != pid:
+            wd = os.path.join(self.base_dir, f"w{pid}")
+            os.makedirs(wd, exist_ok=True)
+            self._active_base = wd
+            self.cache = _ResultCache(os.path.join(wd, ".nlce_cache.h5"))
+            self._wd_pid = pid
+            self.skip_cluster_gen = False   # each worker generates clusters once
+        return self._active_base
 
     # ------------------------------------------------------------------
     # Parameter → Hamiltonian flags
@@ -261,6 +281,7 @@ class PyrochloreNLCERunner:
         (all 1D float arrays), or ``None`` on failure.
         """
         params = np.asarray(params, dtype=float)
+        self._worker_dir()   # bind this process's isolated base_dir + cache
 
         # Cache key folds in the field so multi-field evaluations don't collide.
         if h is None:
@@ -311,7 +332,7 @@ class PyrochloreNLCERunner:
             "--geometry=pyrochlore",
             "--pipeline=full_ed",
             f"--max_order={self.max_order}",
-            f"--base_dir={self.base_dir}",
+            f"--base_dir={self._active_base}",
             f"--temp_min={self.temp_min:.8f}",
             f"--temp_max={self.temp_max:.8f}",
             f"--temp_bins={self.temp_bins}",
@@ -336,7 +357,7 @@ class PyrochloreNLCERunner:
     def _read_result(self) -> Optional[dict]:
         """Read the NLCE summation output from disk."""
         nlc_dir = os.path.join(
-            self.base_dir, f"nlc_results_order_{self.max_order}"
+            self._active_base, f"nlc_results_order_{self.max_order}"
         )
         cv_file = os.path.join(nlc_dir, "nlc_specific_heat.txt")
         if not os.path.isfile(cv_file):
@@ -579,10 +600,12 @@ class PyrochloreNLCEFit:
 # CLI
 # ---------------------------------------------------------------------------
 
-# Zeeman conversion for non-Kramers Pr3+ (4f2) [111] doublet:
-#   h[meV] = B[T] * G_EFF * MU_B_MEV
-MU_B_MEV = 0.05788    # Bohr magneton in meV/T
-G_EFF    = 5.4        # effective g along local [111] (Kimura 2013 / Sibille 2018)
+# Zeeman conversion for non-Kramers Pr3+ (4f2) [111] doublet, in KELVIN units
+# (couplings + temperature + field all in K; the data T is already in K):
+#   h[K] = B[T] * G_EFF * (mu_B / k_B) = B * G_EFF * 0.6717 K/T
+# (mu_B/k_B = 0.05788 meV/T / 0.08617 meV/K = 0.6717 K/T).
+MU_B_K = 0.05788 / 0.08617    # = 0.6717 K/T  (mu_B in Kelvin per Tesla)
+G_EFF  = 5.4                  # effective g along local [111] (Kimura 2013 / Sibille 2018)
 
 
 def _load_dataset(path: str, *, T_min=None, T_max=None, weight=1.0,
@@ -700,7 +723,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         ds_list = cfg.get("datasets") or cfg.get("experimental_data") or []
         for ds_cfg in ds_list:
             B = ds_cfg.get("h")   # field in Tesla for a multi-field dataset
-            h_meV = (float(B) * args.g_eff * MU_B_MEV) if B is not None else None
+            # Field in KELVIN (couplings + temp are in K); key kept as h_meV.
+            h_meV = (float(B) * args.g_eff * MU_B_K) if B is not None else None
             ds = _load_dataset(
                 ds_cfg["file"],
                 T_min=ds_cfg.get("T_min", ds_cfg.get("temp_min")),
