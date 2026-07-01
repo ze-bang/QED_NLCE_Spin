@@ -218,23 +218,33 @@ class PyrochloreNLCERunner:
     # Parameter → Hamiltonian flags
     # ------------------------------------------------------------------
 
-    def _param_to_flags(self, params: np.ndarray) -> list[str]:
-        """Convert parameter vector to geometry-specific CLI flags."""
+    def _param_to_flags(self, params: np.ndarray,
+                        h_override: Optional[float] = None) -> list[str]:
+        """Convert parameter vector to geometry-specific CLI flags.
+
+        ``h_override`` (when not None) supplies the Zeeman field for a
+        per-field (multi-field) evaluation; the field is then NOT a fit
+        parameter. The pyrochlore geometry accepts Jxx/Jyy/Jzz/h only, so the
+        non-Kramers QSI model is fit in the XYZ frame (Jxx = -J± + J±±,
+        Jyy = -J± - J±±, Jzz = Jzz; Jz± = 0 by time reversal).
+        """
         if self.model == "qsi":
-            Jzz, Jpm, Jpmpm, Jzpm = params
-            return [
-                f"--Jzz={Jzz:.12f}",
-                f"--Jpm={Jpm:.12f}",
-                f"--Jpmpm={Jpmpm:.12f}",
-                f"--Jzpm={Jzpm:.12f}",
-            ]
+            # Local-frame QSI mapped to the XYZ couplings the ED code consumes.
+            Jzz, Jpm, Jpmpm = params[0], params[1], params[2]
+            Jxx, Jyy = -Jpm + Jpmpm, -Jpm - Jpmpm
+            h = h_override if h_override is not None else 0.0
+            return [f"--Jxx={Jxx:.12f}", f"--Jyy={Jyy:.12f}",
+                    f"--Jzz={Jzz:.12f}", f"--h={h:.12f}"]
         if self.model == "xyz":
             Jxx, Jyy, Jzz = params[:3]
-            h = params[3] if len(params) > 3 else 0.0
+            h = (h_override if h_override is not None
+                 else (params[3] if len(params) > 3 else 0.0))
             return [f"--Jxx={Jxx:.12f}", f"--Jyy={Jyy:.12f}",
                     f"--Jzz={Jzz:.12f}", f"--h={h:.12f}"]
         if self.model == "heisenberg":
-            J, h = (params[0], params[1] if len(params) > 1 else 0.0)
+            J = params[0]
+            h = (h_override if h_override is not None
+                 else (params[1] if len(params) > 1 else 0.0))
             return [f"--Jxx={J:.12f}", f"--Jyy={J:.12f}",
                     f"--Jzz={J:.12f}", f"--h={h:.12f}"]
         raise ValueError(f"Unknown model: {self.model!r}")
@@ -243,20 +253,29 @@ class PyrochloreNLCERunner:
     # Core: run NLCE and return T, Cv, S arrays
     # ------------------------------------------------------------------
 
-    def run(self, params: np.ndarray) -> Optional[dict[str, np.ndarray]]:
-        """Run the full NLCE pipeline for ``params``.  Returns dict with
-        keys ``T``, ``Cv``, ``S`` (all 1D float arrays), or ``None`` on
-        failure.
+    def run(self, params: np.ndarray,
+            h: Optional[float] = None,
+            field_dir: Optional[tuple] = None) -> Optional[dict[str, np.ndarray]]:
+        """Run the full NLCE pipeline for ``params`` at Zeeman field ``h``
+        (meV) along ``field_dir``. Returns dict with keys ``T``, ``Cv``, ``S``
+        (all 1D float arrays), or ``None`` on failure.
         """
         params = np.asarray(params, dtype=float)
 
-        # Cache lookup
-        cached = self.cache.get(params)
+        # Cache key folds in the field so multi-field evaluations don't collide.
+        if h is None:
+            cache_key = params
+        else:
+            fd = np.asarray(field_dir if field_dir is not None else (0.0, 0.0, 0.0),
+                            dtype=float)
+            cache_key = np.concatenate([params, [float(h)], fd])
+
+        cached = self.cache.get(cache_key)
         if cached is not None:
             return cached
 
         # Build CLI command
-        cmd = self._build_cmd(params)
+        cmd = self._build_cmd(params, h, field_dir)
         try:
             subprocess.run(cmd, check=True, capture_output=True, timeout=7200)
         except subprocess.CalledProcessError as e:
@@ -278,25 +297,25 @@ class PyrochloreNLCERunner:
         if self.bernu and self.E0_per_site is not None:
             result = self._apply_bernu(result)
 
-        self.cache.put(params, result)
+        self.cache.put(cache_key, result)
         return result
 
-    def _build_cmd(self, params: np.ndarray) -> list[str]:
+    def _build_cmd(self, params: np.ndarray,
+                   h: Optional[float] = None,
+                   field_dir: Optional[tuple] = None) -> list[str]:
+        # Pipeline: full_ed (the in-process symmetry-adapted solver). Large
+        # clusters (Hilbert dim > EDOptions.oftlm_cutoff) auto-route to OFTLM
+        # inside dense_ed.run_ed_in_process -- no extra flag needed.
         cmd = [
             sys.executable, "-m", "qed_nlce",
             "--geometry=pyrochlore",
-            "--pipeline=pyrochlore_order8",
+            "--pipeline=full_ed",
             f"--max_order={self.max_order}",
             f"--base_dir={self.base_dir}",
             f"--temp_min={self.temp_min:.8f}",
             f"--temp_max={self.temp_max:.8f}",
             f"--temp_bins={self.temp_bins}",
-            f"--po8_full_threshold={self.po8_full_threshold}",
-            f"--po8_k_base={self.po8_k_base}",
-            f"--po8_k_max={self.po8_k_max}",
             "--thermo",
-            # Hamiltonian prep always runs (writes coupling constants per params).
-            # Cluster generation is skipped after the first call.
         ]
         if self.skip_cluster_gen:
             cmd.append("--skip_cluster_gen")
@@ -305,7 +324,12 @@ class PyrochloreNLCERunner:
         if self.parallel:
             cmd.extend(["--parallel", f"--num_cores={self.num_cores}"])
 
-        cmd.extend(self._param_to_flags(params))
+        cmd.extend(self._param_to_flags(params, h))
+        if field_dir is not None:
+            cmd.extend(["--field_dir",
+                        f"{float(field_dir[0]):.10f}",
+                        f"{float(field_dir[1]):.10f}",
+                        f"{float(field_dir[2]):.10f}"])
         cmd.extend(self.extra_flags)
         return cmd
 
@@ -428,17 +452,20 @@ class PyrochloreNLCEFit:
         self._best_params = None
 
     def chi2(self, params: np.ndarray) -> float:
-        """Evaluate chi2 for ``params``."""
+        """Evaluate chi2 for ``params``, summing over datasets. Each dataset may
+        carry its own Zeeman field (``h_meV`` / ``field_dir``); the NLCE is run
+        once per distinct field (the runner caches on params+field)."""
         params = np.asarray(params, dtype=float)
-        result = self.runner.run(params)
-
         self._n_eval += 1
-
-        if result is None:
-            return 1e12
 
         total = 0.0
         for ds in self.datasets:
+            # Per-field evaluation (multi-field fit); h=None -> zero/single field.
+            result = self.runner.run(
+                params, h=ds.get("h_meV"), field_dir=ds.get("field_dir"))
+            if result is None:
+                return 1e12
+
             T_exp = np.asarray(ds["T"])
             T_min = ds.get("T_min", self.runner.temp_min)
             T_max = ds.get("T_max", self.runner.temp_max)
@@ -552,17 +579,28 @@ class PyrochloreNLCEFit:
 # CLI
 # ---------------------------------------------------------------------------
 
+# Zeeman conversion for non-Kramers Pr3+ (4f2) [111] doublet:
+#   h[meV] = B[T] * G_EFF * MU_B_MEV
+MU_B_MEV = 0.05788    # Bohr magneton in meV/T
+G_EFF    = 5.4        # effective g along local [111] (Kimura 2013 / Sibille 2018)
+
+
 def _load_dataset(path: str, *, T_min=None, T_max=None, weight=1.0,
-                  obs="Cv") -> dict:
-    """Load a two-column (T, observable) text file."""
+                  obs="Cv", h_meV=None, field_dir=None) -> dict:
+    """Load a two-column (T, observable) text file (optionally field-tagged)."""
     data = np.loadtxt(path)
-    return {
+    ds = {
         "T": data[:, 0],
         obs: data[:, 1],
-        "T_min": T_min or data[0, 0],
-        "T_max": T_max or data[-1, 0],
+        "T_min": T_min if T_min is not None else data[0, 0],
+        "T_max": T_max if T_max is not None else data[-1, 0],
         "weight": weight,
     }
+    if h_meV is not None:
+        ds["h_meV"] = float(h_meV)
+    if field_dir is not None:
+        ds["field_dir"] = tuple(float(x) for x in field_dir)
+    return ds
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -587,6 +625,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--model", type=str, default="qsi",
                         choices=["qsi", "xyz", "heisenberg"],
                         help="Spin model (default: qsi).")
+    parser.add_argument("--g_eff", type=float, default=G_EFF,
+                        help="Effective g along local [111] for the Zeeman "
+                             "conversion h[meV]=B[T]*g_eff*mu_B (default %(default)s).")
     # QSI initial / bounds
     parser.add_argument("--Jzz_init", type=float, default=0.5)
     parser.add_argument("--Jpm_init", type=float, default=0.25)
@@ -654,12 +695,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.exp_config:
         with open(args.exp_config) as f:
             cfg = json.load(f)
-        for ds_cfg in cfg["datasets"]:
+        # Accept both schemas: single-field ("datasets") and multi-field
+        # ("experimental_data", each with a Tesla "h" + "field_dir").
+        ds_list = cfg.get("datasets") or cfg.get("experimental_data") or []
+        for ds_cfg in ds_list:
+            B = ds_cfg.get("h")   # field in Tesla for a multi-field dataset
+            h_meV = (float(B) * args.g_eff * MU_B_MEV) if B is not None else None
             ds = _load_dataset(
                 ds_cfg["file"],
-                T_min=ds_cfg.get("T_min"), T_max=ds_cfg.get("T_max"),
+                T_min=ds_cfg.get("T_min", ds_cfg.get("temp_min")),
+                T_max=ds_cfg.get("T_max", ds_cfg.get("temp_max")),
                 weight=ds_cfg.get("weight", 1.0),
                 obs=ds_cfg.get("observable", "Cv"),
+                h_meV=h_meV,
+                field_dir=ds_cfg.get("field_dir"),
             )
             datasets.append(ds)
     elif args.exp_Cv:
@@ -676,24 +725,34 @@ def main(argv: Optional[list[str]] = None) -> int:
         parser.error("Provide --exp_Cv or --exp_config.")
 
     # --- Parameter setup ---
+    # Multi-field fits derive the Zeeman h per dataset (h_meV), so h is NOT a
+    # fit parameter; single/zero-field fits keep h in the vector.
+    multi_field = any("h_meV" in ds for ds in datasets)
+
+    def _jb(lo, hi):  # coupling bound helper (fall back to the Jzz window)
+        return (getattr(args, lo, args.Jzz_min), getattr(args, hi, args.Jzz_max))
+
     if args.model == "qsi":
-        param_names = ["Jzz", "Jpm", "Jpmpm", "Jzpm"]
-        bounds = [
-            (args.Jzz_min,   args.Jzz_max),
-            (args.Jpm_min,   args.Jpm_max),
-            (args.Jpmpm_min, args.Jpmpm_max),
-            (args.Jzpm_min,  args.Jzpm_max),
-        ]
-        initial = np.array([args.Jzz_init, args.Jpm_init,
-                            args.Jpmpm_init, args.Jzpm_init])
+        # Non-Kramers: Jz± = 0 by time reversal -> 3 exchange params
+        # (Jzz, J±, J±±), mapped to the ED code's Jxx/Jyy/Jzz in _param_to_flags.
+        param_names = ["Jzz", "Jpm", "Jpmpm"]
+        bounds  = [(args.Jzz_min, args.Jzz_max), _jb("Jpm_min", "Jpm_max"),
+                   _jb("Jpmpm_min", "Jpmpm_max")]
+        initial = np.array([args.Jzz_init, args.Jpm_init, args.Jpmpm_init])
     elif args.model == "xyz":
-        param_names = ["Jxx", "Jyy", "Jzz", "h"]
-        bounds = [(args.Jzz_min, args.Jzz_max)] * 3 + [(0.0, 5.0)]
-        initial = np.array([1.0, 1.0, 1.0, 0.0])
+        param_names = ["Jxx", "Jyy", "Jzz"]
+        bounds  = [(args.Jzz_min, args.Jzz_max)] * 3
+        initial = np.array([1.0, 1.0, 1.0])
     else:  # heisenberg
-        param_names = ["J", "h"]
-        bounds = [(0.0, 3.0), (0.0, 3.0)]
-        initial = np.array([1.0, 0.0])
+        param_names = ["J"]
+        bounds  = [(0.0, 3.0)]
+        initial = np.array([1.0])
+
+    if not multi_field and args.model in ("xyz", "heisenberg"):
+        # Fit the field too when it is not fixed per dataset.
+        param_names = param_names + ["h"]
+        bounds = bounds + [(0.0, 5.0)]
+        initial = np.append(initial, 0.0)
 
     # --- Build runner ---
     runner = PyrochloreNLCERunner(

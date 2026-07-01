@@ -569,8 +569,11 @@ class NLCExpansion:
         
         # Calculate weights for each cluster
         for cluster_id, order in sorted_clusters:
-            if self.clusters[cluster_id]['eigenvalues'] is None:
-                print(f"  Cluster {cluster_id} (order {order}): SKIPPED (no eigenvalues)")
+            # OFTLM (large) clusters have no eigenvalue spectrum but DO carry
+            # pre-computed P(T) in 'thermo_pt' -- only skip if neither is present.
+            if (self.clusters[cluster_id]['eigenvalues'] is None
+                    and 'thermo_pt' not in self.clusters[cluster_id]):
+                print(f"  Cluster {cluster_id} (order {order}): SKIPPED (no data)")
                 continue
             
             # Get subclusters with their multiplicities
