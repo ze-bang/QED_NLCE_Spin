@@ -47,6 +47,11 @@ class FullEDPipeline(Pipeline):
                             "(default: 'auto' for pyrochlore, 'euler' for triangular)")
         g.add_argument("--temp_points_file", type=str, default=None,
                        help="File of explicit temperature points (triangular summation only)")
+        g.add_argument("--oftlm_cutoff", type=int, default=1 << 15,
+                       help="Full Hilbert-dim above which a cluster uses OFTLM "
+                            "instead of exact dense ED (default 32768 = 2^15). "
+                            "Raise to force exact ED on larger clusters when the "
+                            "symmetry-reduced sectors are still small.")
 
     # ------------------------------------------------------------ ED config
 
@@ -80,6 +85,7 @@ class FullEDPipeline(Pipeline):
             use_symm=use_symm and not getattr(args, "symmetrized", False),
             streaming_symmetry=streaming_symmetry,
             basis_cache_dir=None,
+            oftlm_cutoff=getattr(args, "oftlm_cutoff", 1 << 15),
         )
 
     def needs_thermo(self, args: argparse.Namespace) -> bool:
