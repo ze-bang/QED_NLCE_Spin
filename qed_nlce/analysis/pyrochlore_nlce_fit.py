@@ -674,6 +674,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--base_dir",  type=str, default="nlce_fit_work")
     parser.add_argument("--output_dir", type=str, default="fit_results_pyrochlore")
     parser.add_argument("--skip_cluster_gen", action="store_true")
+    parser.add_argument("--resummation", type=str, default="euler",
+                        choices=["auto", "direct", "none", "euler", "wynn",
+                                 "shanks", "aitken", "pade", "theta",
+                                 "robust", "wynn_multi", "brezinski"],
+                        help="NLCE series-acceleration method forwarded to the "
+                             "summation kernel. Default 'euler': a fixed linear "
+                             "tail transform that cannot produce the divide-by-"
+                             "near-zero spikes that Wynn/robust throw once the "
+                             "bare series diverges (order>=5 for PZO at ~1 K).")
     parser.add_argument("--workers",   type=int, default=1,
                         help="Parallel workers for differential evolution.")
     parser.add_argument("--num_cores", type=int, default=4,
@@ -796,6 +805,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         E0_per_site=args.E0_per_site,
         S_gs=args.S_gs,
         skip_cluster_gen=args.skip_cluster_gen,
+        extra_flags=["--resummation", args.resummation],
     )
 
     # --- Fit ---
