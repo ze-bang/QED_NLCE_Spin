@@ -138,6 +138,11 @@ Examples:
                         help='Output directory for cluster information')
     parser.add_argument('--no_pbc', action='store_true',
                         help='Disable periodic boundary conditions (not recommended)')
+    parser.add_argument('--ycs_details', action='store_true',
+                        help='Derive and display the |Emb(s->c)| / |Aut(s)| breakdown '
+                             'of every Y_cs via VF2 subgraph enumeration. Purely '
+                             'cosmetic (Y_cs itself always comes from the fast nauty '
+                             'path) and VERY slow at order >= 6; off by default.')
     return parser.parse_args()
 
 
@@ -297,17 +302,60 @@ def _canonical_certificate(G, nodes):
     return pynauty.certificate(pg)
 
 
+def _tet_shape_key(tet_graph, tet_nodes, L):
+    """Translation-canonical shape key of a tetrahedron cluster (PBC).
+
+    Tet ``t`` sits at diamond coords ``(i, j, k, s)`` with
+    ``cell = t // 2 -> (i, j, k)`` in base-L digits and sublattice
+    ``s = t % 2`` (up/down; intrinsic -- diamond translations preserve
+    it). BFS with minimal-image cell steps unwraps PBC; a min-shift
+    canonicalizes translation. Two clusters share the key iff they are
+    lattice translates, so memoizing nauty certificates by it is exact
+    and cuts certificate computations by ~N_tet per shape -- the
+    difference between hours and minutes at order 8 (2L^3 = 2000+ tets).
+    """
+    nodes = sorted(tet_nodes)
+    sub = tet_graph.subgraph(tet_nodes)
+
+    def ijks(t):
+        cell, s = t // 2, t % 2
+        return cell // (L * L), (cell // L) % L, cell % L, s
+
+    start = nodes[0]
+    si, sj, sk, ss = ijks(start)
+    coord = {start: (0, 0, 0, ss)}
+    queue = [start]
+    while queue:
+        cur = queue.pop(0)
+        ci, cj, ck, _ = coord[cur]
+        ai, aj, ak, _ = ijks(cur)
+        for nb in sub.neighbors(cur):
+            if nb in coord:
+                continue
+            bi, bj, bk, bs = ijks(nb)
+            di = ((bi - ai + L // 2) % L) - L // 2
+            dj = ((bj - aj + L // 2) % L) - L // 2
+            dk = ((bk - ak + L // 2) % L) - L // 2
+            coord[nb] = (ci + di, cj + dj, ck + dk, bs)
+            queue.append(nb)
+    mi = min(c[0] for c in coord.values())
+    mj = min(c[1] for c in coord.values())
+    mk = min(c[2] for c in coord.values())
+    return frozenset((ci - mi, cj - mj, ck - mk, s)
+                     for (ci, cj, ck, s) in coord.values())
+
+
 def generate_clusters(tet_graph, max_order):
     """
     Generate all topologically distinct clusters up to max_order.
-    
+
     Uses anchored expansion to enumerate all connected subgraphs,
     then deduplicates via nauty canonical certificates (O(1) lookup per graph).
-    
+
     Args:
         tet_graph: Diamond lattice graph (tetrahedra as nodes)
         max_order: Maximum cluster size (number of tetrahedra)
-    
+
     Returns:
         distinct_clusters: List of cluster representatives (each is list of node IDs)
         multiplicities: List of multiplicities L_tet(c) per tetrahedron
@@ -345,22 +393,35 @@ def generate_clusters(tet_graph, max_order):
         
         # Nauty certificate -> (representative_nodes, embedding_count)
         cert_map: dict[bytes, tuple[frozenset, int]] = {}
-        
+        # Translation-canonical shape -> certificate memo (_tet_shape_key).
+        # Valid only for the standard PBC lattice (N = 2 L^3, indexing
+        # tet_id = 2*cell + s); disabled otherwise.
+        L_lin = round((N / 2) ** (1.0 / 3.0))
+        use_shape_memo = (2 * L_lin ** 3 == N)
+        shape_memo: dict[frozenset, bytes] = {}
+
         for anchor in nodes_sorted:
             start = frozenset([anchor])
             frontier = set(n for n in tet_graph.neighbors(anchor) if n >= anchor)
             visited = set()
-            
+
             stack = [(start, frontier)]
             while stack:
                 current, fr = stack.pop()
-                
+
                 if current in visited:
                     continue
                 visited.add(current)
-                
+
                 if len(current) == order:
-                    cert = _canonical_certificate(tet_graph, current)
+                    if use_shape_memo:
+                        skey = _tet_shape_key(tet_graph, current, L_lin)
+                        cert = shape_memo.get(skey)
+                        if cert is None:
+                            cert = _canonical_certificate(tet_graph, current)
+                            shape_memo[skey] = cert
+                    else:
+                        cert = _canonical_certificate(tet_graph, current)
                     if cert in cert_map:
                         rep, cnt = cert_map[cert]
                         cert_map[cert] = (rep, cnt + 1)
@@ -795,8 +856,12 @@ def visualize_cluster_dual(tetrahedra, cluster, cluster_index, multiplicity, out
             formula_lines.append(r"$Y_{c,s} = \frac{|Emb(s \to c)|}{|Aut(s)|}$")
             formula_lines.append("")
             for sub_idx, Y_cs, Emb, Aut, sub_order in subcluster_details:
-                formula_lines.append(r"$Y_{c,%d} = \frac{%d}{%d} = %d$ (order %d subcluster)" % 
-                                   (sub_idx, Emb, Aut, Y_cs, sub_order))
+                if Emb is not None and Aut is not None:
+                    formula_lines.append(r"$Y_{c,%d} = \frac{%d}{%d} = %d$ (order %d subcluster)" %
+                                       (sub_idx, Emb, Aut, Y_cs, sub_order))
+                else:
+                    formula_lines.append(r"$Y_{c,%d} = %d$ (order %d subcluster)" %
+                                       (sub_idx, Y_cs, sub_order))
         
         # Join and display
         formula_text = '\n'.join(formula_lines)
@@ -984,10 +1049,15 @@ def main():
     save_subclusters_info(subclusters_info, distinct_clusters, multiplicities, output_dir)
     print(f"Subclusters information saved to {output_dir}/subclusters_info.txt")
     
-    # Print Y_cs values with formula details
+    # Print Y_cs values. The Y_cs themselves come from the fast nauty path in
+    # identify_subclusters; the |Emb|/|Aut| breakdown is re-derived via slow
+    # VF2 subgraph enumeration purely for display, so it is opt-in
+    # (--ycs_details) -- at order >= 6 that re-derivation dominates the whole
+    # generation wall time for zero numerical benefit.
     print("\n" + "="*60)
     print("SUBCLUSTER MULTIPLICITIES (Y_cs = |Emb(s→c)| / |Aut(s)|)")
     print("="*60)
+    show_ycs_details = getattr(args, 'ycs_details', False)
     for i, cluster in enumerate(distinct_clusters):
         if len(cluster) == 1:
             continue
@@ -995,14 +1065,14 @@ def main():
         subclusters = subclusters_info.get(i, [])
         for sub_idx, count in subclusters:
             sub_order = len(distinct_clusters[sub_idx])
-            subcluster_nodes = distinct_clusters[sub_idx]
-            
-            # Compute with verbose details
-            _, details = compute_subcluster_multiplicities(
-                cluster, subcluster_nodes, tet_graph, verbose=True
-            )
-            
-            print(f"  Y_{{c{i+1},s{sub_idx+1}}} = |Emb(s→c)| / |Aut(s)| = {details['Emb_s_to_c']} / {details['Aut_s']} = {count} (subcluster order {sub_order})")
+            if show_ycs_details:
+                subcluster_nodes = distinct_clusters[sub_idx]
+                _, details = compute_subcluster_multiplicities(
+                    cluster, subcluster_nodes, tet_graph, verbose=True
+                )
+                print(f"  Y_{{c{i+1},s{sub_idx+1}}} = |Emb(s→c)| / |Aut(s)| = {details['Emb_s_to_c']} / {details['Aut_s']} = {count} (subcluster order {sub_order})")
+            else:
+                print(f"  Y_{{c{i+1},s{sub_idx+1}}} = {count} (subcluster order {sub_order})")
     
     # Extract and save detailed information for each cluster
     print("\nExtracting and saving detailed cluster information...")
@@ -1025,16 +1095,21 @@ def main():
         print("\nVisualizing clusters (dual representation: diamond + pyrochlore)...")
         viz_dir = os.path.join(output_dir, 'cluster_visualizations')
         for i, (cluster, multiplicity, mult_detail) in enumerate(zip(distinct_clusters, multiplicities, all_mult_details)):
-            # Gather subcluster details for this cluster
+            # Gather subcluster details for this cluster. The slow VF2-derived
+            # |Emb|/|Aut| breakdown is opt-in via --ycs_details; the default
+            # annotation shows the (nauty-derived) Y_cs values only.
             subcluster_detail_list = []
             subclusters = subclusters_info.get(i, [])
             for sub_idx, count in subclusters:
                 sub_order = len(distinct_clusters[sub_idx])
-                subcluster_nodes = distinct_clusters[sub_idx]
-                _, details = compute_subcluster_multiplicities(
-                    cluster, subcluster_nodes, tet_graph, verbose=True
-                )
-                subcluster_detail_list.append((sub_idx + 1, count, details['Emb_s_to_c'], details['Aut_s'], sub_order))
+                if show_ycs_details:
+                    subcluster_nodes = distinct_clusters[sub_idx]
+                    _, details = compute_subcluster_multiplicities(
+                        cluster, subcluster_nodes, tet_graph, verbose=True
+                    )
+                    subcluster_detail_list.append((sub_idx + 1, count, details['Emb_s_to_c'], details['Aut_s'], sub_order))
+                else:
+                    subcluster_detail_list.append((sub_idx + 1, count, None, None, sub_order))
             
             filename = visualize_cluster_dual(tetrahedra, cluster, i + 1, multiplicity, viz_dir,
                                              mult_details=mult_detail, 

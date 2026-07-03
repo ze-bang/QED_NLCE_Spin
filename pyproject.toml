@@ -42,6 +42,12 @@ dev = ["pytest>=7", "pytest-xdist>=3"]
 # Only collect the real test-suite; analysis/ contains CLI scripts that
 # happen to be named ``test_*`` and are not pytest modules.
 testpaths = ["tests"]
+markers = [
+    "slow: long-running validation (high-order cluster generation; run with -m slow)",
+]
+# Slow tests are excluded by default; run `pytest -m slow` before any
+# production order-7/8 NLCE campaign.
+addopts = "-m 'not slow'"
 
 [project.scripts]
 qed-nlce = "qed_nlce.cli:main"

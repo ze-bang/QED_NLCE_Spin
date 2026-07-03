@@ -3,11 +3,12 @@
 This module used to host the ``./ED`` subprocess bridge
 (``build_ed_command``, ``run_ed_subprocess``, binary discovery).
 Those have been removed: every NLCE pipeline now runs ED in-process
-through :mod:`qed_nlce.core.dense_ed`, which dispatches each
-cluster through the canonical ``qed.solve(H, ...)`` /
-``qed.thermal(H, ...)`` Python verbs. What remains is the
-:class:`EDOptions` dataclass that pipelines populate per cluster and
-that the in-process backend reads when building those calls.
+through :mod:`qed_nlce.core.dense_ed`, which dispatches each cluster
+to ``qed.full_spectrum`` (exact, symmetry-adapted -- abelian and
+non-abelian) below ``oftlm_cutoff``, or to matrix-free OFTLM
+(:func:`qed_nlce.ed.oftlm.oftlm_thermodynamics`) above it. What
+remains is the :class:`EDOptions` dataclass that pipelines populate
+per cluster and that the in-process backend reads when dispatching.
 """
 
 from __future__ import annotations
@@ -44,9 +45,13 @@ class EDOptions:
     samples: Optional[int] = None
     krylov_dim: Optional[int] = None
     # Large-cluster OFTLM fallback: clusters whose full Hilbert dimension exceeds
-    # ``oftlm_cutoff`` are handled by matrix-free OFTLM (QED) instead of dense ED.
-    oftlm_cutoff: int = 1 << 15          # 32768 (~15-site full space)
+    # ``oftlm_cutoff`` are handled by matrix-free OFTLM (QED) instead of the
+    # exact qed.full_spectrum tier (which applies abelian + non-abelian
+    # symmetry reduction, so it scales well past the raw-dimension naive limit).
+    oftlm_cutoff: int = 1 << 18          # 262144 (~18-site full space)
     oftlm_num_exact: int = 16            # N_V low-lying states treated exactly
-    oftlm_num_samples: int = 20          # R random samples
+    oftlm_num_samples: int = 20          # R random samples (split across seeds)
     oftlm_krylov_dim: int = 100          # Lanczos steps per sample
+    oftlm_num_seeds: int = 2             # independent seeds -> std_error bands
+    device: str = "cpu"                  # qed.full_spectrum backend device
     extra_flags: list[str] = field(default_factory=list)

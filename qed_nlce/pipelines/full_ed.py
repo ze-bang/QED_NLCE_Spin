@@ -47,11 +47,21 @@ class FullEDPipeline(Pipeline):
                             "(default: 'auto' for pyrochlore, 'euler' for triangular)")
         g.add_argument("--temp_points_file", type=str, default=None,
                        help="File of explicit temperature points (triangular summation only)")
-        g.add_argument("--oftlm_cutoff", type=int, default=1 << 15,
-                       help="Full Hilbert-dim above which a cluster uses OFTLM "
-                            "instead of exact dense ED (default 32768 = 2^15). "
-                            "Raise to force exact ED on larger clusters when the "
-                            "symmetry-reduced sectors are still small.")
+        g.add_argument("--oftlm_cutoff", type=int, default=1 << 18,
+                       help="Full Hilbert-dim (2**num_sites, BEFORE symmetry "
+                            "reduction) above which a cluster is routed to "
+                            "stochastic OFTLM instead of the exact "
+                            "qed.full_spectrum backend (default 262144 = 2^18). "
+                            "The exact backend applies abelian AND non-abelian "
+                            "spatial symmetry, U(1)-Sz, spin-flip, and "
+                            "time-reversal reduction, so many clusters well "
+                            "above this raw threshold still solve quickly -- "
+                            "watch the per-cluster 'qed-bridge' log lines "
+                            "(eigenvalue count + wall time) to judge whether "
+                            "raising this further is safe for your clusters. "
+                            "A cluster with a near-trivial automorphism group "
+                            "gets little reduction, so raising this too far "
+                            "risks an effectively-brute-force dense diagonalization.")
         g.add_argument("--oftlm_num_exact", type=int, default=16,
                        help="OFTLM: number of lowest eigenstates treated exactly. "
                             "Must be large enough to cover the thermally-relevant "
@@ -63,6 +73,12 @@ class FullEDPipeline(Pipeline):
         g.add_argument("--oftlm_krylov_dim", type=int, default=100,
                        help="OFTLM: Lanczos/Krylov dimension per random vector "
                             "(default 100).")
+        g.add_argument("--oftlm_num_seeds", type=int, default=2,
+                       help="OFTLM: number of independent seeds the sample "
+                            "budget is split across (default 2). >= 2 yields "
+                            "per-cluster std_error bands that the summation "
+                            "propagates into NLCE error estimates; 1 disables "
+                            "error tracking (not recommended for order >= 6).")
 
     # ------------------------------------------------------------ ED config
 
@@ -96,10 +112,12 @@ class FullEDPipeline(Pipeline):
             use_symm=use_symm and not getattr(args, "symmetrized", False),
             streaming_symmetry=streaming_symmetry,
             basis_cache_dir=None,
-            oftlm_cutoff=getattr(args, "oftlm_cutoff", 1 << 15),
+            oftlm_cutoff=getattr(args, "oftlm_cutoff", 1 << 18),
             oftlm_num_exact=getattr(args, "oftlm_num_exact", 16),
             oftlm_num_samples=getattr(args, "oftlm_num_samples", 20),
             oftlm_krylov_dim=getattr(args, "oftlm_krylov_dim", 100),
+            oftlm_num_seeds=getattr(args, "oftlm_num_seeds", 2),
+            device=getattr(args, "device", "cpu"),
         )
 
     def needs_thermo(self, args: argparse.Namespace) -> bool:

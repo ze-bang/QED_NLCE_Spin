@@ -32,25 +32,52 @@ from collections import defaultdict
 
 import pynauty
 
+# Bond-color helpers. Import must work both as a package module
+# (qed_nlce.prep.generate_triangular_clusters) AND as a standalone
+# script (the NLCE workflow invokes this file via `python .../gen*.py`,
+# where relative imports have no parent package).
+try:
+    from . import _bond_color
+except ImportError:  # script execution: sys.path[0] is this directory
+    import _bond_color
+
 
 def extract_cluster_info(lattice, pos, cluster_nodes):
     """
     Extract detailed information about a cluster.
-    
+
     Args:
         lattice: NetworkX graph of triangular lattice (spin sites)
         pos: Dictionary mapping site IDs to 2D positions
         cluster_nodes: List of site IDs in this cluster
-    
+
     Returns:
         Dictionary containing vertices, positions, edges,
         adjacency matrix, and node mapping
+
+    Positions are PBC-UNWRAPPED via exact integer-coordinate BFS, never
+    the raw periodic-cell coordinates: the Hamiltonian builders classify
+    each bond's direction (kitaev / anisotropic couplings) from these
+    positions, and a representative embedding that crosses the periodic
+    boundary would otherwise have bonds whose position delta points along
+    no lattice direction at all -- silently misclassifying the coupling.
     """
     # Create subgraph for this cluster
     subgraph = lattice.subgraph(cluster_nodes)
-    
-    # Get vertex positions
-    vertex_positions = {v: pos[v] for v in cluster_nodes}
+
+    # PBC-unwrapped vertex positions (exact, integer-coordinate BFS).
+    import numpy as _np
+
+    _a1 = _np.array([1.0, 0.0])
+    _a2 = _np.array([0.5, _np.sqrt(3) / 2])
+    L = lattice.graph["L"]
+    ij_of = {v: lattice.nodes[v]["ij"] for v in cluster_nodes}
+    coords = _bond_color.unwrap_integer_coords(
+        cluster_nodes, subgraph.neighbors, ij_of, L
+    )
+    vertex_positions = {
+        v: tuple(ci * _a1 + cj * _a2) for v, (ci, cj) in coords.items()
+    }
     
     # Get edges in the cluster
     edges = list(subgraph.edges())
@@ -126,6 +153,14 @@ Examples:
                         help='Output directory for cluster information')
     parser.add_argument('--no_pbc', action='store_true',
                         help='Disable periodic boundary conditions (not recommended)')
+    parser.add_argument('--bond_colored', action='store_true',
+                        help='Deduplicate clusters by bond-direction-COLORED graph '
+                             'isomorphism (mod the S3 color action) instead of plain '
+                             'topology. REQUIRED for direction-dependent models '
+                             '(kitaev, anisotropic): topologically isomorphic '
+                             'embeddings with different bond-direction content '
+                             '(straight vs bent chains, ...) are not isospectral '
+                             'there. Produces more clusters per order.')
     return parser.parse_args()
 
 
@@ -155,11 +190,12 @@ def create_triangular_lattice(L, periodic=True):
     site_id = 0
     site_mapping = {}  # (i, j) -> site_id
     
+    G.graph["L"] = L  # periodic cell size, needed for minimal-image bond colors
     for i, j in itertools.product(range(L), repeat=2):
         position = i * a1 + j * a2
         pos[site_id] = position
         site_mapping[(i, j)] = site_id
-        G.add_node(site_id, pos=position)
+        G.add_node(site_id, pos=position, ij=(i, j))
         site_id += 1
     
     # Add edges (nearest neighbors) - 6 neighbors per site on triangular lattice
@@ -219,17 +255,67 @@ def _canonical_certificate(G, nodes):
     return pynauty.certificate(pg)
 
 
-def generate_clusters(lattice, max_order):
+def _colored_edges(G, nodes):
+    """Edges of the induced subgraph with exact minimal-image bond colors."""
+    L = G.graph["L"]
+    out = []
+    for u, v in G.subgraph(nodes).edges():
+        di, dj = _bond_color.minimal_image_dij(
+            G.nodes[u]["ij"], G.nodes[v]["ij"], L)
+        out.append((u, v, _bond_color.bond_color_from_dij(di, dj)))
+    return out
+
+
+def _cluster_certificate(G, nodes, bond_colored: bool):
+    """Dispatch: plain topological certificate, or bond-colored (mod S3).
+
+    ``bond_colored=True`` is REQUIRED for direction-dependent models
+    (kitaev / anisotropic): topologically isomorphic embeddings with
+    different bond-direction multisets (straight vs bent chains, ...)
+    are NOT isospectral there and must be distinct NLCE clusters.
     """
-    Generate all topologically distinct site-based clusters up to max_order.
-    
+    if not bond_colored:
+        return _canonical_certificate(G, nodes)
+    return _bond_color.colored_certificate(nodes, _colored_edges(G, nodes))
+
+
+def _shape_key(G, nodes):
+    """Exact translation-canonical shape key of an embedding.
+
+    Unwraps the subset to integer lattice coordinates (minimal-image BFS)
+    and shifts so min(i) = min(j) = 0. Two embeddings share the key iff
+    they are LATTICE TRANSLATES of one another -- a strictly finer
+    relation than any certificate, so memoizing certificate results by
+    this key is exact. The payoff: the ESU enumeration visits every
+    embedding (~N_sites translated copies per shape), and the pynauty
+    certificate (6 subdivision graphs in colored mode) is by far the
+    per-subset cost; with the memo it is paid once per SHAPE instead of
+    once per embedding (~100x fewer certificate computations on a
+    100-site lattice).
+    """
+    L = G.graph["L"]
+    ij_of = {v: G.nodes[v]["ij"] for v in nodes}
+    sub = G.subgraph(nodes)
+    coords = _bond_color.unwrap_integer_coords(nodes, sub.neighbors, ij_of, L)
+    mi = min(c[0] for c in coords.values())
+    mj = min(c[1] for c in coords.values())
+    return frozenset((ci - mi, cj - mj) for (ci, cj) in coords.values())
+
+
+def generate_clusters(lattice, max_order, bond_colored: bool = False):
+    """
+    Generate all distinct site-based clusters up to max_order.
+
     Uses anchored expansion to enumerate all connected subgraphs,
     then deduplicates via nauty canonical certificates (O(1) lookup per graph).
-    
+
     Args:
         lattice: NetworkX graph of the triangular lattice
         max_order: Maximum cluster size (number of sites)
-    
+        bond_colored: dedup by bond-direction-colored isomorphism (mod the
+            S3 color action) instead of plain topology. REQUIRED for the
+            kitaev / anisotropic models -- see _bond_color.py.
+
     Returns:
         distinct_clusters: List of cluster representatives (each is list of node IDs)
         multiplicities: List of multiplicities L(c) per site
@@ -267,7 +353,9 @@ def generate_clusters(lattice, max_order):
         
         # Nauty certificate -> (representative_nodes, embedding_count)
         cert_map: dict[bytes, tuple[frozenset, int]] = {}
-        
+        # Translation-canonical shape -> certificate memo (see _shape_key).
+        shape_memo: dict[frozenset, bytes] = {}
+
         for anchor in nodes_sorted:
             start = frozenset([anchor])
             frontier = set(n for n in lattice.neighbors(anchor) if n >= anchor)
@@ -282,7 +370,11 @@ def generate_clusters(lattice, max_order):
                 visited.add(current)
                 
                 if len(current) == order:
-                    cert = _canonical_certificate(lattice, current)
+                    skey = _shape_key(lattice, current)
+                    cert = shape_memo.get(skey)
+                    if cert is None:
+                        cert = _cluster_certificate(lattice, current, bond_colored)
+                        shape_memo[skey] = cert
                     if cert in cert_map:
                         rep, cnt = cert_map[cert]
                         cert_map[cert] = (rep, cnt + 1)
@@ -372,51 +464,64 @@ def compute_subcluster_multiplicities(cluster_nodes, subcluster_nodes, lattice, 
     return Y_cs
 
 
-def identify_subclusters(distinct_clusters, lattice):
+def identify_subclusters(distinct_clusters, lattice, bond_colored: bool = False):
     """
-    Identify all topological subclusters for each distinct cluster
-    and their multiplicities Y_cs.
-    
+    Identify all subclusters for each distinct cluster and their
+    multiplicities Y_cs.
+
     Uses nauty canonical certificates for O(1) isomorphism lookup instead
     of pairwise VF2 comparison -- critical speedup at order >= 6.
+
+    ``bond_colored`` MUST match the flag used in generate_clusters: the
+    Y_cs table is keyed by the same equivalence classes as the cluster
+    list, so mixing colored clusters with topological subcluster lookup
+    (or vice versa) silently corrupts every NLCE weight.
     """
     # Pre-build a certificate -> cluster_index lookup for all distinct clusters
     cert_to_idx: dict[bytes, int] = {}
     for i, cluster in enumerate(distinct_clusters):
-        cert = _canonical_certificate(lattice, cluster)
+        cert = _cluster_certificate(lattice, cluster, bond_colored)
         cert_to_idx[cert] = i
 
     clusters_by_order = defaultdict(list)
     for i, cluster in enumerate(distinct_clusters):
         clusters_by_order[len(cluster)].append((i, cluster))
-    
+
     subclusters_info = {}
-    
+    # Translation-canonical shape -> certificate memo, shared across all
+    # clusters' subset scans (identical sub-shapes recur constantly).
+    shape_memo: dict[frozenset, bytes] = {}
+
     for i, cluster in enumerate(distinct_clusters):
         cluster_order = len(cluster)
         subclusters_info[i] = []
-        
+
         if cluster_order == 1:
             continue
-        
+
         for order in range(1, cluster_order):
             subcluster_counts = defaultdict(int)
-            
+
             for subcluster_set in itertools.combinations(cluster, order):
                 subgraph = lattice.subgraph(subcluster_set)
-                
+
                 if not nx.is_connected(subgraph):
                     continue
-                
-                cert = _canonical_certificate(lattice, subcluster_set)
+
+                skey = _shape_key(lattice, subcluster_set)
+                cert = shape_memo.get(skey)
+                if cert is None:
+                    cert = _cluster_certificate(lattice, subcluster_set,
+                                                bond_colored)
+                    shape_memo[skey] = cert
                 if cert in cert_to_idx:
                     subcluster_counts[cert_to_idx[cert]] += 1
-            
+
             for subcluster_idx, count in subcluster_counts.items():
                 subclusters_info[i].append((subcluster_idx, count))
-        
+
         subclusters_info[i].sort(key=lambda x: len(distinct_clusters[x[0]]))
-    
+
     return subclusters_info
 
 
@@ -656,22 +761,25 @@ def main():
     print(f"  Maximum order: {args.max_order}")
     print(f"  Lattice size: {L}x{L}")
     print(f"  Periodic BC: {periodic}")
+    print(f"  Bond-colored dedup: {args.bond_colored}")
     print(f"  Output directory: {args.output_dir}")
     print("="*80)
-    
+
     # Create triangular lattice
     print("\nCreating triangular lattice...")
     G, pos = create_triangular_lattice(L, periodic=periodic)
     print(f"  Created lattice with {G.number_of_nodes()} sites and {G.number_of_edges()} edges")
-    
+
     # Generate clusters
-    print("\nGenerating topologically distinct clusters...")
-    distinct_clusters, multiplicities, mult_details = generate_clusters(G, args.max_order)
+    print("\nGenerating distinct clusters...")
+    distinct_clusters, multiplicities, mult_details = generate_clusters(
+        G, args.max_order, bond_colored=args.bond_colored)
     print(f"\nTotal: {len(distinct_clusters)} distinct clusters")
-    
-    # Identify subclusters
+
+    # Identify subclusters (MUST use the same dedup mode as generation).
     print("\nIdentifying subclusters and computing multiplicities...")
-    subclusters_info = identify_subclusters(distinct_clusters, G)
+    subclusters_info = identify_subclusters(distinct_clusters, G,
+                                            bond_colored=args.bond_colored)
     
     # Create output directory
     output_info_dir = os.path.join(args.output_dir, f'cluster_info_order_{args.max_order}')

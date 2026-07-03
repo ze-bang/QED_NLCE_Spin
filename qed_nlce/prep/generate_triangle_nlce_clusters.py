@@ -41,6 +41,15 @@ from fractions import Fraction
 
 import pynauty
 
+# Bond-color helpers. Import must work both as a package module AND as a
+# standalone script (the workflow/fitter invoke this file via
+# `python .../generate_triangle_nlce_clusters.py`, where relative imports
+# have no parent package).
+try:
+    from . import _bond_color
+except ImportError:  # script execution: sys.path[0] is this directory
+    import _bond_color
+
 
 def parse_arguments():
     parser = argparse.ArgumentParser(
@@ -62,6 +71,11 @@ Examples:
                         help='Size of finite lattice (default: max_order + 3)')
     parser.add_argument('--output_dir', type=str, default='.',
                         help='Output directory for cluster information')
+    parser.add_argument('--bond_colored', action='store_true',
+                        help='Deduplicate clusters by bond-direction-COLORED site-graph '
+                             'isomorphism (mod the S3 color action) instead of plain '
+                             'topology. REQUIRED for direction-dependent models '
+                             '(kitaev, anisotropic). Produces more clusters per order.')
     return parser.parse_args()
 
 
@@ -236,15 +250,72 @@ def _site_graph_to_pynauty(triangles, tri_nodes):
     return pg
 
 
-def _canonical_certificate(triangles, tri_nodes):
+def _canonical_certificate(triangles, tri_nodes, colored_ctx=None):
     """Compute a nauty canonical certificate for the physical site graph.
 
-    Two triangle clusters are topologically equivalent iff they have the
-    same canonical certificate. This replaces the O(n!) VF2 isomorphism
-    check with an O(1) dictionary lookup.
+    Two triangle clusters are equivalent iff they have the same
+    certificate. This replaces the O(n!) VF2 isomorphism check with an
+    O(1) dictionary lookup.
+
+    ``colored_ctx = (ij_of, L)`` switches to BOND-COLORED certificates
+    (colors = the three lattice bond directions, canonical modulo the S3
+    color action; see qed_nlce/prep/_bond_color.py). REQUIRED for
+    direction-dependent models (kitaev / anisotropic): topologically
+    isomorphic clusters with different bond-direction content are not
+    isospectral there and must stay distinct NLCE clusters.
     """
-    pg = _site_graph_to_pynauty(triangles, tri_nodes)
-    return pynauty.certificate(pg)
+    if colored_ctx is None:
+        pg = _site_graph_to_pynauty(triangles, tri_nodes)
+        return pynauty.certificate(pg)
+
+    bond_color_from_dij = _bond_color.bond_color_from_dij
+    colored_certificate = _bond_color.colored_certificate
+    minimal_image_dij = _bond_color.minimal_image_dij
+    ij_of, L = colored_ctx
+    sites = set()
+    edges = set()
+    for tri_id in tri_nodes:
+        v0, v1, v2 = triangles[tri_id]
+        sites.update([v0, v1, v2])
+        edges.add((min(v0, v1), max(v0, v1)))
+        edges.add((min(v1, v2), max(v1, v2)))
+        edges.add((min(v0, v2), max(v0, v2)))
+    colored_edges = []
+    for u, v in edges:
+        di, dj = minimal_image_dij(ij_of[u], ij_of[v], L)
+        colored_edges.append((u, v, bond_color_from_dij(di, dj)))
+    return colored_certificate(sites, colored_edges)
+
+
+def _tri_shape_key(meta_graph, tri_nodes, L):
+    """Translation-canonical shape key of a triangle cluster.
+
+    Up-triangle ``t`` sits at integer anchor ``(t // L, t % L)``; BFS over
+    the cluster's meta-subgraph with minimal-image anchor steps unwraps
+    PBC, then a min-shift canonicalizes translation. Two clusters share
+    the key iff they are lattice translates, so memoizing certificates by
+    it is exact and cuts pynauty calls by ~N_triangles per shape.
+    """
+    nodes = sorted(tri_nodes)
+    sub = meta_graph.subgraph(tri_nodes)
+    start = nodes[0]
+    coord = {start: (0, 0)}
+    queue = [start]
+    while queue:
+        cur = queue.pop(0)
+        ci, cj = coord[cur]
+        ai, aj = cur // L, cur % L
+        for nb in sub.neighbors(cur):
+            if nb in coord:
+                continue
+            bi, bj = nb // L, nb % L
+            di = ((bi - ai + L // 2) % L) - L // 2
+            dj = ((bj - aj + L // 2) % L) - L // 2
+            coord[nb] = (ci + di, cj + dj)
+            queue.append(nb)
+    mi = min(c[0] for c in coord.values())
+    mj = min(c[1] for c in coord.values())
+    return frozenset((ci - mi, cj - mj) for (ci, cj) in coord.values())
 
 
 def are_physically_isomorphic(triangles, nodes1, nodes2):
@@ -274,19 +345,24 @@ def graph_hash(site_graph):
     return (n, m, degrees)
 
 
-def generate_triangle_clusters(meta_graph, triangles, max_order):
+def generate_triangle_clusters(meta_graph, triangles, max_order,
+                               colored_ctx=None):
     """
-    Generate all topologically distinct triangle clusters up to max_order.
-    
+    Generate all distinct triangle clusters up to max_order.
+
     Uses PHYSICAL SITE GRAPH ISOMORPHISM to determine cluster equivalence.
-    This is the correct criterion - two triangle clusters are equivalent iff
-    their induced site+bond graphs are isomorphic.
-    
+    This is the correct criterion for direction-INdependent models - two
+    triangle clusters are equivalent iff their induced site+bond graphs
+    are isomorphic. For direction-dependent models (kitaev/anisotropic),
+    pass ``colored_ctx = (ij_of, L)`` to use bond-colored site-graph
+    isomorphism instead (see _canonical_certificate).
+
     Args:
         meta_graph: The meta-graph of triangle connectivity (for enumeration)
         triangles: List of triangles (for site graph construction)
         max_order: Maximum number of triangles in a cluster
-    
+        colored_ctx: None (topological) or (ij_of, L) for bond-colored dedup
+
     Returns:
         distinct_clusters: List of frozensets of triangle IDs
         multiplicities: List of multiplicities L(c)
@@ -298,14 +374,17 @@ def generate_triangle_clusters(meta_graph, triangles, max_order):
     
     N_triangles = meta_graph.number_of_nodes()
     nodes_sorted = sorted(meta_graph.nodes())
-    
+    L_lin = int(round(N_triangles ** 0.5))  # anchors: tri_id = i*L + j
+
     print(f"  Meta-graph has {N_triangles} triangles, {meta_graph.number_of_edges()} edges")
-    
+
     for order in range(1, max_order + 1):
         print(f"Generating clusters of order {order} (triangles)...")
-        
+
         # Certificate → (representative_nodes, raw_count)
         cert_map = {}
+        # Translation-canonical shape -> certificate memo (_tri_shape_key).
+        shape_memo = {}
         
         for anchor in nodes_sorted:
             start = frozenset([anchor])
@@ -321,8 +400,13 @@ def generate_triangle_clusters(meta_graph, triangles, max_order):
                 visited.add(current)
                 
                 if len(current) == order:
-                    cert = _canonical_certificate(triangles, current)
-                    
+                    skey = _tri_shape_key(meta_graph, current, L_lin)
+                    cert = shape_memo.get(skey)
+                    if cert is None:
+                        cert = _canonical_certificate(
+                            triangles, current, colored_ctx=colored_ctx)
+                        shape_memo[skey] = cert
+
                     if cert in cert_map:
                         rep, cnt = cert_map[cert]
                         cert_map[cert] = (rep, cnt + 1)
@@ -398,45 +482,61 @@ def get_cluster_bonds(triangles, cluster_nodes):
     return list(bonds)
 
 
-def identify_subclusters(distinct_clusters, multiplicities, orders, triangles, meta_graph):
+def identify_subclusters(distinct_clusters, multiplicities, orders, triangles,
+                         meta_graph, colored_ctx=None):
     """
     Identify subclusters for each cluster and compute embedding counts.
     Uses nauty canonical certificates for O(1) matching.
+
+    ``colored_ctx`` MUST match the value used in generate_triangle_clusters:
+    the Y_cs table is keyed by the same equivalence classes as the cluster
+    list, so mixing colored clusters with topological subcluster lookup
+    (or vice versa) silently corrupts every NLCE weight.
     """
     clusters_by_order = defaultdict(list)
     for i, cluster in enumerate(distinct_clusters):
         clusters_by_order[orders[i]].append((i, cluster))
-    
+
     # Pre-compute certificate → cluster index for all representatives
     cert_to_idx = {}
     for i, cluster in enumerate(distinct_clusters):
         if orders[i] >= 1:
-            cert = _canonical_certificate(triangles, cluster)
+            cert = _canonical_certificate(triangles, cluster,
+                                          colored_ctx=colored_ctx)
             cert_to_idx[cert] = i
     
     subclusters_info = {}
-    
+    # Translation-canonical shape -> certificate memo shared across all
+    # clusters' subset scans.
+    L_lin = int(round(meta_graph.number_of_nodes() ** 0.5))
+    shape_memo = {}
+
     for i, cluster_nodes in enumerate(distinct_clusters):
         cluster_order = orders[i]
         subclusters_info[i] = []
-        
+
         if cluster_order == 0:
             continue
-        
+
         n_sites = len(get_cluster_sites(triangles, cluster_nodes))
         subclusters_info[i].append((0, n_sites))
-        
+
         for sub_order in range(1, cluster_order):
             subcluster_counts = defaultdict(int)
-            
+
             for subset in itertools.combinations(cluster_nodes, sub_order):
                 subset = frozenset(subset)
                 subset_subgraph = meta_graph.subgraph(subset)
-                
+
                 if not nx.is_connected(subset_subgraph):
                     continue
-                
-                cert = _canonical_certificate(triangles, subset)
+
+                skey = _tri_shape_key(meta_graph, subset, L_lin)
+                cert = shape_memo.get(skey)
+                if cert is None:
+                    cert = _canonical_certificate(triangles, subset,
+                                                  colored_ctx=colored_ctx)
+                    shape_memo[skey] = cert
                 if cert in cert_to_idx:
                     subcluster_counts[cert_to_idx[cert]] += 1
             
@@ -766,41 +866,49 @@ def main():
     print(f"Parameters:")
     print(f"  Maximum order: {args.max_order} triangles")
     print(f"  Lattice size: {L}x{L}")
+    print(f"  Bond-colored dedup: {args.bond_colored}")
     print(f"  Output directory: {args.output_dir}")
     print(f"  Visualization: {'enabled' if do_visualize else 'disabled'}")
     print("="*80)
-    
+
     # Create lattice and identify triangles
     print("\nCreating triangular lattice...")
     site_lattice, site_pos, triangles, tri_pos, site_mapping = create_triangular_lattice_with_triangles(L)
     print(f"  {site_lattice.number_of_nodes()} sites, {len(triangles)} up-triangles")
-    
+
     # Build meta-graph
     print("\nBuilding triangle meta-graph...")
     meta_graph, vertex_to_triangles = build_triangle_meta_graph(triangles, L)
     print(f"  Meta-graph: {meta_graph.number_of_nodes()} nodes, {meta_graph.number_of_edges()} edges")
-    
+
+    # Bond-colored dedup context: integer site coords + periodic cell size.
+    colored_ctx = None
+    if args.bond_colored:
+        ij_of = {v: site_lattice.nodes[v]["ij"] for v in site_lattice.nodes()}
+        colored_ctx = (ij_of, L)
+
     # Handle order 0 (single site) separately
     print("\nAdding order 0 cluster (single site)...")
     order0_cluster = frozenset()  # Empty triangle set
     order0_mult = Fraction(1, 1)
-    
+
     # Generate triangle clusters
     print("\nGenerating triangle clusters...")
     distinct_clusters, multiplicities, orders = generate_triangle_clusters(
-        meta_graph, triangles, args.max_order)
-    
+        meta_graph, triangles, args.max_order, colored_ctx=colored_ctx)
+
     # Prepend order 0
     distinct_clusters = [order0_cluster] + distinct_clusters
     multiplicities = [order0_mult] + multiplicities
     orders = [0] + orders
-    
+
     print(f"\nTotal: {len(distinct_clusters)} distinct clusters (including order 0)")
-    
-    # Identify subclusters
+
+    # Identify subclusters (MUST use the same dedup mode as generation).
     print("\nIdentifying subclusters...")
     subclusters_info = identify_subclusters(
-        distinct_clusters, multiplicities, orders, triangles, meta_graph)
+        distinct_clusters, multiplicities, orders, triangles, meta_graph,
+        colored_ctx=colored_ctx)
     
     # Create output directory
     output_info_dir = os.path.join(args.output_dir, f'cluster_info_order_{args.max_order}')

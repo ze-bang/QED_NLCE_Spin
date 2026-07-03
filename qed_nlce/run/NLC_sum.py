@@ -171,13 +171,30 @@ class NLCExpansion:
                         # the summation consumes them via _cluster_thermo_quantities.
                         if '/thermodynamics/temperatures' in f:
                             tg = f['/thermodynamics']
-                            self.clusters[cluster_id]['thermo_pt'] = {
+                            pt = {
                                 'temperatures': tg['temperatures'][:],
                                 'energy': tg['energy'][:],
                                 'specific_heat': tg['specific_heat'][:],
                                 'entropy': tg['entropy'][:],
                             }
+                            # Independent-seed resampling errors (OFTLM):
+                            # propagated through the weight subtraction so
+                            # the final sum carries an honest stochastic band.
+                            for prop in ('energy', 'specific_heat', 'entropy'):
+                                key = f'std_error_{prop}'
+                                if key in tg:
+                                    pt[key] = tg[key][:]
+                            self.clusters[cluster_id]['thermo_pt'] = pt
                             self.clusters[cluster_id]['eigenvalues'] = None
+                            # Track stochastic provenance: OFTLM P(T) carries
+                            # sample noise, which the weight subtraction can
+                            # amplify -- see the cancellation diagnostic in
+                            # calculate_weights.
+                            method = f['/eigendata'].attrs.get('method', b'')
+                            if isinstance(method, bytes):
+                                method = method.decode()
+                            self.clusters[cluster_id]['is_stochastic'] = (
+                                str(method).upper() == 'OFTLM')
                             continue
                 except Exception as e:
                     print(f"Warning: Error reading HDF5 file for cluster {cluster_id}: {e}")
@@ -259,6 +276,18 @@ class NLCExpansion:
             raise ValueError(
                 f"cluster {cluster_id}: neither eigenvalues nor P(T) available")
         Tc = np.asarray(pt['temperatures'], dtype=float)
+        # np.interp clamps (constant-extrapolates) outside the stored grid;
+        # silently doing that produces flat, wrong P(T) tails if the
+        # summation was invoked with a wider temp range than the ED step.
+        t_lo, t_hi = float(np.min(Tc)), float(np.max(Tc))
+        if (self.temp_values.min() < t_lo * (1 - 1e-9)
+                or self.temp_values.max() > t_hi * (1 + 1e-9)):
+            print(f"  WARNING: cluster {cluster_id}: summation temperature "
+                  f"grid [{self.temp_values.min():.4g}, "
+                  f"{self.temp_values.max():.4g}] extends beyond the stored "
+                  f"P(T) grid [{t_lo:.4g}, {t_hi:.4g}]; values outside are "
+                  f"CLAMPED (flat) and wrong. Rerun the ED step with a "
+                  f"matching --temp_min/--temp_max.")
         order = np.argsort(Tc)
         def _itp(y):
             return np.interp(self.temp_values, Tc[order],
@@ -268,6 +297,30 @@ class NLCExpansion:
             R = 6.02214076e23 * 1.380649e-23
             e, c, s = e * R, c * R, s * R
         return {'energy': e, 'specific_heat': c, 'entropy': s}
+
+    def _cluster_thermo_errors(self, cluster_id):
+        """Per-cluster stochastic standard errors on ``self.temp_values``.
+
+        Exact (full-spectrum) clusters return None; OFTLM clusters return
+        the independent-seed resampling errors interpolated onto the
+        summation grid (SI-scaled to match the quantities).
+        """
+        pt = self.clusters[cluster_id].get('thermo_pt')
+        if pt is None or 'std_error_specific_heat' not in pt:
+            return None
+        Tc = np.asarray(pt['temperatures'], dtype=float)
+        order = np.argsort(Tc)
+        out = {}
+        for prop in ('energy', 'specific_heat', 'entropy'):
+            key = f'std_error_{prop}'
+            if key not in pt:
+                return None
+            err = np.interp(self.temp_values, Tc[order],
+                            np.asarray(pt[key], dtype=float)[order])
+            if self.SI:
+                err = err * (6.02214076e23 * 1.380649e-23)
+            out[prop] = err
+        return out
 
     def calculate_thermodynamic_quantities(self, eigenvalues):
         """
@@ -474,36 +527,68 @@ class NLCExpansion:
         Returns:
             List of (cluster_id, order) tuples in processing order
         """
+        import heapq
+
         deps = {}
         for cluster_id in self.clusters:
             subclusters = self.get_subclusters(cluster_id)
             deps[cluster_id] = set(subclusters.keys())
 
+        # Reverse adjacency built ONCE: dependents[s] = clusters that
+        # contain s as a subcluster. Each dependency edge is then visited
+        # exactly once below (true Kahn's algorithm), instead of scanning
+        # every cluster's dep-set on every pop -- that scan was O(n^2)
+        # over the cluster count and dominated at order-8 cluster counts.
+        dependents: dict = {cid: [] for cid in self.clusters}
+        for cid, dep_set in deps.items():
+            for s in dep_set:
+                if s in dependents:  # tolerate dangling subcluster ids
+                    dependents[s].append(cid)
+
         in_degree = {cid: len(d) for cid, d in deps.items()}
-        queue = [cid for cid, deg in in_degree.items() if deg == 0]
-        in_queue = set(queue)   # O(1) membership check instead of O(n) list scan
-        processed = set()       # O(1) membership check for already-emitted nodes
+        # Min-heap keyed on (order, cid): pops in deterministic
+        # (order, id) sequence without re-sorting the queue every pop.
+        heap = [(self.clusters[cid]['order'], cid)
+                for cid, deg in in_degree.items() if deg == 0]
+        heapq.heapify(heap)
+        processed = set()
         sorted_clusters = []
 
-        while queue:
-            queue.sort(key=lambda cid: (self.clusters[cid]['order'], cid))
-            cluster_id = queue.pop(0)
-            in_queue.discard(cluster_id)
-            order = self.clusters[cluster_id]['order']
+        while heap:
+            order, cluster_id = heapq.heappop(heap)
             sorted_clusters.append((cluster_id, order))
             processed.add(cluster_id)
 
-            for cid, dep_set in deps.items():
-                if cluster_id in dep_set:
-                    dep_set.remove(cluster_id)
-                    in_degree[cid] -= 1
-                    if in_degree[cid] == 0 and cid not in processed and cid not in in_queue:
-                        queue.append(cid)
-                        in_queue.add(cid)
+            for cid in dependents[cluster_id]:
+                in_degree[cid] -= 1
+                if in_degree[cid] == 0:
+                    heapq.heappush(heap, (self.clusters[cid]['order'], cid))
 
         if len(sorted_clusters) != len(self.clusters):
             remaining = set(self.clusters.keys()) - processed
-            print(f"WARNING: Dependency cycle detected! Remaining clusters: {remaining}")
+            # Almost always DANGLING subcluster ids (a subclusters_info.txt
+            # entry referencing a cluster with no data on disk -- e.g. a
+            # partially deleted cluster set), not a genuine cycle. Their
+            # weights will be SKIPPED downstream, silently truncating every
+            # branch of the sum that depends on them -- say so loudly.
+            dangling = set()
+            for cid in remaining:
+                dangling |= {s for s in deps.get(cid, ())
+                             if s not in self.clusters}
+            print(f"WARNING: {len(remaining)} clusters have unsatisfiable "
+                  f"dependencies and CANNOT get valid NLCE weights: "
+                  f"{sorted(remaining)}")
+            if dangling:
+                print(f"WARNING: root cause -- subcluster ids referenced but "
+                      f"absent from the cluster set: {sorted(dangling)}. "
+                      f"The cluster directory is INCOMPLETE (partial "
+                      f"deletion / stale subclusters_info.txt); regenerate "
+                      f"it. The NLCE sum below silently EXCLUDES every "
+                      f"affected branch.")
+            else:
+                print("WARNING: genuine dependency cycle (should be "
+                      "impossible for subcluster relations) -- inspect "
+                      "subclusters_info.txt.")
             print("Falling back to order-based sort for remaining clusters.")
             for cid in sorted(remaining, key=lambda c: (self.clusters[c]['order'], c)):
                 sorted_clusters.append((cid, self.clusters[cid]['order']))
@@ -566,6 +651,13 @@ class NLCExpansion:
         
         # Track which clusters have valid weights (all required subclusters available)
         self.valid_weights = set()
+
+        # Squared stochastic errors of the weights, propagated in
+        # quadrature through the subtraction:
+        #   err2_W(c) = err2_P(c) + sum_s Y_cs^2 * err2_W(s)
+        # Exact clusters contribute err2_P = 0 but still inherit their
+        # stochastic subclusters' variance.
+        self.weight_errs2 = {p: {} for p in ('energy', 'specific_heat', 'entropy')}
         
         # Calculate weights for each cluster
         for cluster_id, order in sorted_clusters:
@@ -594,17 +686,60 @@ class NLCExpansion:
             # Get thermodynamic quantities for this cluster (dense spectrum or
             # OFTLM P(T) for large clusters).
             quantities = self._cluster_thermo_quantities(cluster_id)
-            
+            errors = self._cluster_thermo_errors(cluster_id)
+
             # Calculate weights for energy and specific heat
             for prop in ['energy', 'specific_heat', 'entropy']:
                 # Property of the cluster
                 property_value = quantities[prop]
+                err2 = (np.square(errors[prop]) if errors is not None
+                        else np.zeros_like(self.temp_values))
                 # Subtract contributions from all subclusters with correct multiplicities
                 for subcluster_id, multiplicity in subclusters.items():
                     if subcluster_id in self.weights[prop]:
-                        property_value -= self.weights[prop][subcluster_id] * multiplicity
-                # Store the weight
+                        property_value = property_value - \
+                            self.weights[prop][subcluster_id] * multiplicity
+                        sub_err2 = self.weight_errs2[prop].get(subcluster_id)
+                        if sub_err2 is not None:
+                            err2 = err2 + (multiplicity ** 2) * sub_err2
+                # Store the weight (+ its propagated squared error when nonzero)
                 self.weights[prop][cluster_id] = property_value
+                if np.any(err2 > 0):
+                    self.weight_errs2[prop][cluster_id] = err2
+
+            # Stochastic-noise amplification diagnostic. The weight
+            # W = P - sum(Y*W_sub) inherits the ABSOLUTE noise of the
+            # stochastic P(T) inputs; when the subtraction cancels strongly
+            # the contribution is noise-dominated -- the classic silent
+            # failure mode of stochastic solvers at high NLCE order.
+            cv_err2 = self.weight_errs2['specific_heat'].get(cluster_id)
+            if cv_err2 is not None:
+                w_scale = float(np.max(np.abs(
+                    self.weights['specific_heat'][cluster_id])))
+                e_scale = float(np.max(np.sqrt(cv_err2)))
+                if w_scale > 0 and e_scale > 0.5 * w_scale:
+                    print(f"  WARNING: cluster {cluster_id} (order {order}): "
+                          f"propagated stochastic error on W_Cv "
+                          f"(max sigma = {e_scale:.3g}) is "
+                          f"{e_scale/w_scale:.1%} of max|W_Cv| = {w_scale:.3g} "
+                          f"-- this cluster's NLCE contribution is "
+                          f"noise-dominated. Raise --oftlm_num_samples "
+                          f"(error ~ 1/sqrt(R)) or --oftlm_cutoff to solve "
+                          f"it exactly.")
+            elif self.clusters[cluster_id].get('is_stochastic'):
+                # Legacy OFTLM file without std_error datasets: fall back
+                # to the cancellation-ratio heuristic.
+                p_scale = float(np.max(np.abs(quantities['specific_heat'])))
+                w_scale = float(np.max(np.abs(
+                    self.weights['specific_heat'][cluster_id])))
+                if p_scale > 0 and w_scale < 0.05 * p_scale:
+                    amp = p_scale / max(w_scale, 1e-300)
+                    print(f"  WARNING: cluster {cluster_id} (order {order}, "
+                          f"OFTLM, no std_error data): weight cancellation "
+                          f"amplifies the stochastic sample noise ~{amp:.0f}x "
+                          f"(max|W_Cv|/max|P_Cv| = {w_scale/p_scale:.3g}). "
+                          f"Re-run the ED step with --oftlm_num_seeds >= 2 "
+                          f"for a quantitative error band.")
 
             # Mark this cluster as having valid weights for thermodynamic properties
             self.valid_weights.add(cluster_id)
@@ -1154,33 +1289,113 @@ class NLCExpansion:
             else:
                 # Standard summation (no Lanczos-boost)
                 sum_by_order = defaultdict(lambda: np.zeros_like(self.temp_values))
-                
+
                 for cluster_id, weight in self.weights[prop].items():
                     order = self.clusters[cluster_id]['order']
                     if order_cutoff is not None and order > order_cutoff:
                         continue
-                        
+
                     sum_by_order[order] += weight * self.clusters[cluster_id]['multiplicity']
-                
+
                 # Create array of partial sums
                 if sum_by_order:
                     max_order = max(sum_by_order.keys())
                     partial_sums = []
                     cumulative_sum = np.zeros_like(self.temp_values)
-                    
+
                     for order in range(max_order + 1):
                         if order in sum_by_order:
                             cumulative_sum += sum_by_order[order]
                         partial_sums.append(cumulative_sum.copy())
-                    
+
                     partial_sums = np.array(partial_sums)
-                    
+
                     # Apply resummation
                     results[prop] = self.apply_resummation(partial_sums, method=resummation_method)
+
+                    # SOTA convergence bookkeeping (Tang-Khatami-Rigol;
+                    # Schaefer et al. PRB 102, 054408): ALWAYS carry both
+                    # standard accelerations plus the last two bare orders.
+                    # Their mutual agreement region -- not any single
+                    # scheme's smoothness -- is the trusted-T criterion,
+                    # and the Euler-Wynn spread is the quoted error bar.
+                    if prop in ('energy', 'specific_heat', 'entropy'):
+                        results[f'{prop}_euler'] = self.apply_resummation(
+                            partial_sums, method='euler')
+                        results[f'{prop}_wynn'] = self.apply_resummation(
+                            partial_sums, method='wynn')
+                        results[f'{prop}_bare_last'] = partial_sums[-1].copy()
+                        results[f'{prop}_bare_prev'] = (
+                            partial_sums[-2].copy() if len(partial_sums) >= 2
+                            else partial_sums[-1].copy())
                 else:
                     print(f"Warning: No weights found for property {prop}")
                     results[prop] = np.zeros_like(self.temp_values)
         
+        # Stochastic error band of the BARE sum: err^2 = sum_c (L_c sigma_Wc)^2
+        # over the included clusters (independent seeds per cluster). This is
+        # the standard quoted scale for typicality-in-NLCE (Richter/
+        # Steinigeweg PRB 99, 144422); resummation reweights the tail by
+        # O(1) factors so the bare band is a faithful upper estimate.
+        for prop in ('energy', 'specific_heat', 'entropy'):
+            errs2 = getattr(self, 'weight_errs2', {}).get(prop)
+            if not errs2:
+                continue
+            tot2 = np.zeros_like(self.temp_values)
+            for cluster_id, err2 in errs2.items():
+                order = self.clusters[cluster_id]['order']
+                if order_cutoff is not None and order > order_cutoff:
+                    continue
+                mult = self.clusters[cluster_id]['multiplicity']
+                tot2 = tot2 + (mult ** 2) * err2
+            if np.any(tot2 > 0):
+                results[f'{prop}_stderr'] = np.sqrt(tot2)
+                print(f"  {prop}: stochastic std-error band "
+                      f"max = {float(np.max(results[f'{prop}_stderr'])):.4g} "
+                      f"(from {len(errs2)} stochastic-lineage clusters)")
+
+        # ---- Automated trusted-T criterion (standard NLCE practice) ----
+        # T*(prop) = lowest temperature above which BOTH
+        #   (a) the last two bare orders agree, and
+        #   (b) the Euler and Wynn accelerations agree,
+        # to within rel_tol (1%). Below T* the expansion has left its
+        # convergence region and NO resummed curve should be trusted,
+        # however smooth it looks. (Tang-Khatami-Rigol arXiv:1207.3366;
+        # Schaefer et al. PRB 102, 054408 quote exactly this criterion.)
+        rel_tol = 0.01
+        trusted = {}
+        for prop in ('energy', 'specific_heat', 'entropy'):
+            if f'{prop}_euler' not in results:
+                continue
+            scale = np.maximum(np.abs(results[f'{prop}_bare_last']), 1e-12)
+            dev_orders = np.abs(results[f'{prop}_bare_last']
+                                - results[f'{prop}_bare_prev']) / scale
+            dev_schemes = np.abs(results[f'{prop}_euler']
+                                 - results[f'{prop}_wynn']) / scale
+            ok = (dev_orders < rel_tol) & (dev_schemes < rel_tol)
+            # NLCE converges from high T downward: find the lowest T such
+            # that every grid point above it satisfies both checks.
+            t_star = None
+            idx = np.argsort(self.temp_values)
+            ok_sorted = ok[idx]
+            # walk from the top down while converged
+            j = len(ok_sorted) - 1
+            while j >= 0 and ok_sorted[j]:
+                j -= 1
+            if j < len(ok_sorted) - 1:
+                t_star = float(self.temp_values[idx][j + 1])
+            trusted[prop] = t_star
+            if t_star is not None:
+                print(f"  {prop}: trusted for T >= {t_star:.4g} "
+                      f"(bare order-to-order AND Euler-vs-Wynn agree to "
+                      f"{rel_tol:.0%} there)")
+            else:
+                print(f"  {prop}: NO trusted temperature window at "
+                      f"{rel_tol:.0%} tolerance -- do not use this curve "
+                      f"quantitatively; add orders or loosen the criterion "
+                      f"knowingly.")
+        results['trusted_T'] = trusted
+
         # Check for negative specific heat (indicates convergence issues)
         if 'specific_heat' in results:
             negative_cv_temps = self.temp_values[results['specific_heat'] < 0]
@@ -1498,23 +1713,60 @@ if __name__ == "__main__":
     specific_heat_file = os.path.join(args.output_dir, "nlc_specific_heat.txt")
     entropy_file = os.path.join(args.output_dir, "nlc_entropy.txt")
 
-    # Save energy data
-    with open(energy_file, 'w') as f:
-        f.write("# Temperature\tEnergy\n")
-        for i, temp in enumerate(nlc.temp_values):
-            f.write(f"{temp:.8e}\t{results['energy'][i]:.8e}\n")
+    # Save the three thermodynamic curves; when stochastic (OFTLM) clusters
+    # contributed, a third column carries the propagated std-error band.
+    for prop, path, label in (
+        ('energy', energy_file, 'Energy'),
+        ('specific_heat', specific_heat_file, 'Specific_Heat'),
+        ('entropy', entropy_file, 'Entropy'),
+    ):
+        err = results.get(f'{prop}_stderr')
+        with open(path, 'w') as f:
+            if err is not None:
+                f.write(f"# Temperature\t{label}\tStd_Error\n")
+                for i, temp in enumerate(nlc.temp_values):
+                    f.write(f"{temp:.8e}\t{results[prop][i]:.8e}\t{err[i]:.8e}\n")
+            else:
+                f.write(f"# Temperature\t{label}\n")
+                for i, temp in enumerate(nlc.temp_values):
+                    f.write(f"{temp:.8e}\t{results[prop][i]:.8e}\n")
 
-    # Save specific heat data
-    with open(specific_heat_file, 'w') as f:
-        f.write("# Temperature\tSpecific_Heat\n")
-        for i, temp in enumerate(nlc.temp_values):
-            f.write(f"{temp:.8e}\t{results['specific_heat'][i]:.8e}\n")
+    # Convergence deliverables: both accelerations + bare orders per T
+    # (the Euler-Wynn spread IS the resummation error bar), and the
+    # trusted-T summary. These are what an order-8 paper figure quotes.
+    if 'energy_euler' in results:
+        comp_file = os.path.join(args.output_dir, "nlc_resummation_comparison.txt")
+        with open(comp_file, 'w') as f:
+            f.write("# Per-temperature comparison of resummation schemes.\n"
+                    "# Trust a curve only where bare_last~=bare_prev AND "
+                    "euler~=wynn (see nlc_convergence_summary.txt).\n")
+            f.write("# T" + "".join(
+                f"\t{p}_{s}" for p in ('energy', 'specific_heat', 'entropy')
+                for s in ('euler', 'wynn', 'bare_last', 'bare_prev')) + "\n")
+            for i, temp in enumerate(nlc.temp_values):
+                row = [f"{temp:.8e}"]
+                for p in ('energy', 'specific_heat', 'entropy'):
+                    for s in ('euler', 'wynn', 'bare_last', 'bare_prev'):
+                        row.append(f"{results[f'{p}_{s}'][i]:.8e}")
+                f.write("\t".join(row) + "\n")
 
-    # Save entropy data
-    with open(entropy_file, 'w') as f:
-        f.write("# Temperature\tEntropy\n")
-        for i, temp in enumerate(nlc.temp_values):
-            f.write(f"{temp:.8e}\t{results['entropy'][i]:.8e}\n")
+        summary_file = os.path.join(args.output_dir, "nlc_convergence_summary.txt")
+        with open(summary_file, 'w') as f:
+            f.write("# Automated NLCE convergence report\n")
+            f.write("# Criterion: last two bare orders agree AND Euler vs "
+                    "Wynn agree, both to 1% (TKR arXiv:1207.3366; "
+                    "Schaefer et al. PRB 102, 054408).\n")
+            for prop, t_star in results.get('trusted_T', {}).items():
+                if t_star is not None:
+                    f.write(f"{prop}\ttrusted_T_min\t{t_star:.8e}\n")
+                else:
+                    f.write(f"{prop}\ttrusted_T_min\tNONE\n")
+            err = results.get('specific_heat_stderr')
+            if err is not None:
+                f.write(f"specific_heat\tmax_stochastic_stderr\t"
+                        f"{float(np.max(err)):.8e}\n")
+        print(f"Convergence report: {summary_file}")
+        print(f"Scheme comparison:  {comp_file}")
 
     # Save spin expectation values if requested
     if args.measure_spin:

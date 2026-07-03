@@ -141,9 +141,13 @@ def scatter_ed_jobs(
                 rank, payload.log_tag, exc,
             )
 
-    # Reduce success count to rank 0
-    total_ok = comm.reduce(local_ok, op=MPI.SUM, root=0)
-    return total_ok if rank == 0 else 0
+    # Global success count, identical on EVERY rank. This must be an
+    # allreduce, not a reduce-to-root: the caller's completeness gate
+    # (workflow._step3_ed) runs on all ranks, and a rank that saw only
+    # its local count (or 0) would sys.exit(1) while rank 0 blocks at the
+    # next barrier -- a guaranteed hang on any --mpi run.
+    total_ok = comm.allreduce(local_ok, op=MPI.SUM)
+    return int(total_ok)
 
 
 def is_rank_zero() -> bool:

@@ -150,6 +150,32 @@ def test_eigenvalue_cache_key_changes_with_method(tmp_path, tmp_cluster_file):
     assert k_full.digest() != k_lan.digest()
 
 
+def test_eigenvalue_cache_key_changes_with_oftlm_knobs(tmp_path, tmp_cluster_file):
+    """Retuning --oftlm_cutoff/--oftlm_num_exact/etc must bust the cache --
+    these knobs decide which solver tier ran (exact qed.full_spectrum vs
+    stochastic OFTLM) and OFTLM's statistical accuracy, so a stale hit
+    would silently replay a result from the OTHER tier or a less accurate
+    OFTLM configuration."""
+    ham = _make_ham_dir(str(tmp_path))
+    cache = EigenvalueCache(str(tmp_path / "cache"), enabled=True)
+    k_base = cache.compute_key("triangular_site", ham, tmp_cluster_file,
+                               _make_options(), num_sites=3)
+    for field, value in [
+        ("oftlm_cutoff", 1 << 20),
+        ("oftlm_num_exact", 32),
+        ("oftlm_num_samples", 40),
+        ("oftlm_krylov_dim", 200),
+        ("device", "gpu"),
+    ]:
+        opts = _make_options()
+        setattr(opts, field, value)
+        k_changed = cache.compute_key("triangular_site", ham, tmp_cluster_file,
+                                      opts, num_sites=3)
+        assert k_base.digest() != k_changed.digest(), (
+            f"changing {field} must change the cache digest"
+        )
+
+
 def test_eigenvalue_cache_key_changes_with_hamiltonian(tmp_path, tmp_cluster_file):
     ham_a = _make_ham_dir(str(tmp_path / "a"), suffix="A")
     ham_b = _make_ham_dir(str(tmp_path / "b"), suffix="B")

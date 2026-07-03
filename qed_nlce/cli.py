@@ -111,6 +111,15 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     g.add_argument("--no_cache", action="store_true",
                    help="Disable the on-disk eigenvalue / subcluster cache")
 
+    # Exact-ED backend (qed.full_spectrum) device + completeness gate.
+    g.add_argument("--device", type=str, default="cpu", choices=["cpu", "gpu"],
+                   help="Device for the qed.full_spectrum exact ED backend "
+                        "(default: cpu)")
+    g.add_argument("--allow_incomplete_ed", action="store_true",
+                   help="Proceed to NLCE summation even if some clusters' ED "
+                        "step failed (default: abort before summation so a "
+                        "silently-incomplete high-order sum is never trusted)")
+
     # Back-compat: legacy subprocess-related flags. Silently accepted
     # but no longer used -- the ED step always runs in-process via
     # `import qed`.

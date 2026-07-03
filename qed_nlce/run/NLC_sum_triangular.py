@@ -236,7 +236,19 @@ class NLCExpansionTriangular:
             # Interpolate onto the summation grid. Sort the source by T to be
             # safe; clamp out-of-range queries to the endpoints (np.interp
             # default) — the runner uses the same temp_min/temp_max for ED and
-            # summation so this only matters at the rounding edges.
+            # summation so this only matters at the rounding edges. Warn
+            # loudly if the grids genuinely disagree (standalone reruns with
+            # different --temp_min/--temp_max): clamped values are flat and
+            # WRONG outside the stored range.
+            if (self.temp_values.min() < float(T_src.min()) * (1 - 1e-9)
+                    or self.temp_values.max() > float(T_src.max()) * (1 + 1e-9)):
+                print(f"  WARNING: summation temperature grid "
+                      f"[{self.temp_values.min():.4g}, "
+                      f"{self.temp_values.max():.4g}] extends beyond this "
+                      f"cluster's stored P(T) grid [{T_src.min():.4g}, "
+                      f"{T_src.max():.4g}]; out-of-range values are CLAMPED "
+                      f"(flat) and wrong. Rerun ED with matching "
+                      f"--temp_min/--temp_max.")
             order = np.argsort(T_src)
             T_src = T_src[order]
             result = {}
@@ -247,6 +259,17 @@ class NLCExpansionTriangular:
                 if self.SI:
                     interp = interp * R
                 result[prop] = interp
+            # Independent-seed resampling errors (OFTLM writes
+            # std_error_<prop>): propagate so weights carry a band.
+            for prop in field_map:
+                key = f"std_error_{prop}"
+                if key in grp and grp[key].size == T_src.size:
+                    err = np.interp(
+                        self.temp_values, T_src,
+                        np.asarray(grp[key][:], dtype=float)[order])
+                    if self.SI:
+                        err = err * R
+                    result[key] = err
             return result
 
         return None
@@ -311,35 +334,56 @@ class NLCExpansionTriangular:
     
     def _topological_sort_clusters(self):
         """Sort clusters in dependency order using topological sort (Kahn's algorithm)."""
+        import heapq
+
         deps = {}
         for cluster_id in self.clusters:
             subclusters = self.get_subclusters(cluster_id)
             deps[cluster_id] = set(subclusters.keys())
 
+        # Reverse adjacency built ONCE (true Kahn's algorithm): each
+        # dependency edge is visited exactly once, instead of scanning
+        # every cluster's dep-set on every pop (O(n^2) at order-8
+        # cluster counts).
+        dependents: dict = {cid: [] for cid in self.clusters}
+        for cid, dep_set in deps.items():
+            for s in dep_set:
+                if s in dependents:  # tolerate dangling subcluster ids
+                    dependents[s].append(cid)
+
         in_degree = {cid: len(d) for cid, d in deps.items()}
-        queue = [cid for cid, deg in in_degree.items() if deg == 0]
-        in_queue = set(queue)   # O(1) membership check instead of O(n) list scan
-        processed = set()       # O(1) membership check for already-emitted nodes
+        # Min-heap keyed on (order, cid): deterministic pop sequence
+        # without re-sorting the whole queue every iteration.
+        heap = [(self.clusters[cid]['order'], cid)
+                for cid, deg in in_degree.items() if deg == 0]
+        heapq.heapify(heap)
+        processed = set()
         sorted_clusters = []
 
-        while queue:
-            queue.sort(key=lambda cid: (self.clusters[cid]['order'], cid))
-            cluster_id = queue.pop(0)
-            in_queue.discard(cluster_id)
-            order = self.clusters[cluster_id]['order']
+        while heap:
+            order, cluster_id = heapq.heappop(heap)
             sorted_clusters.append((cluster_id, order))
             processed.add(cluster_id)
 
-            for cid, dep_set in deps.items():
-                if cluster_id in dep_set:
-                    dep_set.remove(cluster_id)
-                    in_degree[cid] -= 1
-                    if in_degree[cid] == 0 and cid not in processed and cid not in in_queue:
-                        queue.append(cid)
-                        in_queue.add(cid)
+            for cid in dependents[cluster_id]:
+                in_degree[cid] -= 1
+                if in_degree[cid] == 0:
+                    heapq.heappush(heap, (self.clusters[cid]['order'], cid))
 
         if len(sorted_clusters) != len(self.clusters):
             remaining = set(self.clusters.keys()) - processed
+            dangling = set()
+            for cid in remaining:
+                dangling |= {s for s in deps.get(cid, ())
+                             if s not in self.clusters}
+            print(f"WARNING: {len(remaining)} clusters have unsatisfiable "
+                  f"dependencies and CANNOT get valid NLCE weights: "
+                  f"{sorted(remaining)}")
+            if dangling:
+                print(f"WARNING: subcluster ids referenced but absent from "
+                      f"the cluster set: {sorted(dangling)} -- the cluster "
+                      f"directory is INCOMPLETE; regenerate it. The sum "
+                      f"below silently EXCLUDES every affected branch.")
             for cid in sorted(remaining, key=lambda c: (self.clusters[c]['order'], c)):
                 sorted_clusters.append((cid, self.clusters[cid]['order']))
 
@@ -412,8 +456,12 @@ class NLCExpansionTriangular:
             'specific_heat': {},
             'entropy': {}
         }
-        
+
         self.valid_weights = set()
+        # Squared stochastic errors of the weights, propagated in quadrature
+        # (err2_W = err2_P + sum Y^2 err2_Wsub); populated only when
+        # stochastic clusters carry std_error_* datasets.
+        self.weight_errs2 = {p: {} for p in ('energy', 'specific_heat', 'entropy')}
         
         for cluster_id, order in sorted_clusters:
             has_eig = self.clusters[cluster_id]['eigenvalues'] is not None
@@ -444,10 +492,45 @@ class NLCExpansionTriangular:
             
             for prop in ['energy', 'specific_heat', 'entropy']:
                 property_value = quantities[prop].copy()
+                err_arr = quantities.get(f'std_error_{prop}') \
+                    if isinstance(quantities, dict) else None
+                err2 = (np.square(err_arr) if err_arr is not None
+                        else np.zeros_like(self.temp_values))
                 for subcluster_id, multiplicity in subclusters.items():
                     if subcluster_id in self.weights[prop]:
                         property_value -= self.weights[prop][subcluster_id] * multiplicity
+                        sub_err2 = self.weight_errs2[prop].get(subcluster_id)
+                        if sub_err2 is not None:
+                            err2 = err2 + (multiplicity ** 2) * sub_err2
                 self.weights[prop][cluster_id] = property_value
+                if np.any(err2 > 0):
+                    self.weight_errs2[prop][cluster_id] = err2
+
+            # Stochastic-noise diagnostic: prefer the propagated band when
+            # available, else the cancellation-ratio heuristic.
+            cv_err2 = self.weight_errs2['specific_heat'].get(cluster_id)
+            if cv_err2 is not None:
+                w_scale = float(np.max(np.abs(
+                    self.weights['specific_heat'][cluster_id])))
+                e_scale = float(np.max(np.sqrt(cv_err2)))
+                if w_scale > 0 and e_scale > 0.5 * w_scale:
+                    print(f"  WARNING: cluster {cluster_id} (order {order}): "
+                          f"propagated stochastic error on W_Cv (max sigma = "
+                          f"{e_scale:.3g}) is {e_scale/w_scale:.1%} of "
+                          f"max|W_Cv| -- noise-dominated contribution. Raise "
+                          f"the stochastic sample count or solve exactly.")
+            elif not has_eig:
+                p_scale = float(np.max(np.abs(quantities['specific_heat'])))
+                w_scale = float(np.max(np.abs(
+                    self.weights['specific_heat'][cluster_id])))
+                if p_scale > 0 and w_scale < 0.05 * p_scale:
+                    amp = p_scale / max(w_scale, 1e-300)
+                    print(f"  WARNING: cluster {cluster_id} (order {order}, "
+                          f"stochastic, no std_error data): weight "
+                          f"cancellation amplifies sample noise ~{amp:.0f}x "
+                          f"(max|W_Cv|/max|P_Cv| = {w_scale/p_scale:.3g}). "
+                          f"Re-run ED with --oftlm_num_seeds >= 2 for a "
+                          f"quantitative band.")
 
             self.valid_weights.add(cluster_id)
             print(f"  Cluster {cluster_id} (order {order}): OK")

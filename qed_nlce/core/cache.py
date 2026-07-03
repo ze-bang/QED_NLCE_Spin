@@ -259,6 +259,20 @@ class EigenvalueCacheKey:
     temp_min: float
     temp_max: float
     temp_bins: int
+    # Dense/OFTLM dispatch threshold + OFTLM quality knobs: these decide
+    # which solver tier actually ran (qed.full_spectrum vs stochastic
+    # OFTLM) and, within OFTLM, its statistical accuracy. Omitting them
+    # let a cache built with a stale --oftlm_cutoff/--oftlm_num_exact
+    # silently serve a result computed by the OTHER tier, or by a less
+    # accurate OFTLM configuration, after a user deliberately retuned
+    # them (e.g. raising --oftlm_cutoff to force exact ED on a cluster
+    # previously routed to OFTLM).
+    oftlm_cutoff: int
+    oftlm_num_exact: int
+    oftlm_num_samples: int
+    oftlm_krylov_dim: int
+    oftlm_num_seeds: int
+    device: str
     # Content hashes of the inputs.
     cluster_graph_hash: str
     hamiltonian_content_hash: str
@@ -366,6 +380,12 @@ class EigenvalueCache:
             temp_min=float(options.temp_min),
             temp_max=float(options.temp_max),
             temp_bins=int(options.temp_bins),
+            oftlm_cutoff=int(getattr(options, "oftlm_cutoff", 1 << 15)),
+            oftlm_num_exact=int(getattr(options, "oftlm_num_exact", 16)),
+            oftlm_num_samples=int(getattr(options, "oftlm_num_samples", 20)),
+            oftlm_krylov_dim=int(getattr(options, "oftlm_krylov_dim", 100)),
+            oftlm_num_seeds=int(getattr(options, "oftlm_num_seeds", 2)),
+            device=str(getattr(options, "device", "cpu")),
             cluster_graph_hash=graph_hash,
             hamiltonian_content_hash=ham_hash,
         )
@@ -397,12 +417,12 @@ class EigenvalueCache:
         try:
             out_subdir = os.path.join(output_dir, "output")
             os.makedirs(out_subdir, exist_ok=True)
-            shutil.copy2(h5, os.path.join(out_subdir, "ed_results.h5"))
+            # Atomic materialization (mirror of the store path): a kill
+            # mid-copy must never leave a torn ed_results.h5 that a
+            # --skip_ed rerun would silently treat as valid-but-empty.
+            _atomic_copy_file(h5, os.path.join(out_subdir, "ed_results.h5"))
             if os.path.isdir(thermo_dir):
-                dst_thermo = os.path.join(out_subdir, "thermo")
-                if os.path.isdir(dst_thermo):
-                    shutil.rmtree(dst_thermo)
-                shutil.copytree(thermo_dir, dst_thermo)
+                _atomic_copy_tree(thermo_dir, os.path.join(out_subdir, "thermo"))
             self.stats.hits += 1
             logging.info(
                 "[cache] HIT  %s  -> %s", digest[:12], output_dir,

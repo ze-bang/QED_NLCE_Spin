@@ -1,7 +1,20 @@
 #!/usr/bin/env python3
 """
-Check if an ED calculation is feasible on current hardware
-Estimates memory requirements and provides recommendations
+Check if an ED calculation is feasible on current hardware.
+Estimates memory requirements and provides recommendations.
+
+IMPORTANT -- relationship to the actual NLCE pipeline router:
+the pipeline (qed_nlce.core.dense_ed.run_ed_in_process) dispatches each
+cluster by raw Hilbert dimension against ``--oftlm_cutoff`` (default
+2^18): below it, EXACT full-spectrum ED via ``qed.full_spectrum`` with
+abelian + non-abelian symmetry / U(1)-Sz / spin-flip / time-reversal
+reduction; above it, matrix-free stochastic OFTLM. The ``FULL``
+estimate below assumes NO symmetry reduction and is therefore a
+worst-case UPPER BOUND -- symmetric clusters routinely solve with far
+smaller blocks. Do not use this tool to declare an order-7/8 cluster
+infeasible; use it for rough sizing, then trust the per-cluster
+``qed-bridge`` log lines (eigenvalue count + wall time) from a real run.
+Use ``--method OFTLM`` here to size clusters above the cutoff.
 """
 
 import sys
@@ -114,8 +127,18 @@ def estimate_memory_requirements(
         # Davidson: larger subspace
         total_memory = vector_size * min(50, krylov_dim)
     elif method == "FULL":
-        # Full diagonalization: needs to store matrix
+        # Full diagonalization: needs to store matrix. NOTE: worst-case
+        # UPPER BOUND -- the pipeline's exact tier (qed.full_spectrum)
+        # block-diagonalizes by every available symmetry first, so the
+        # true peak is max_block_dim^2, often orders of magnitude less.
         total_memory = hilbert_dim * hilbert_dim * COMPLEX_SIZE
+    elif method == "OFTLM":
+        # Matrix-free OFTLM (the pipeline's large-cluster tier):
+        # num_exact exactly-resolved low-lying vectors + a handful of
+        # active Lanczos vectors; the Krylov basis is never fully
+        # materialized in the full Hilbert space.
+        num_exact = 16  # pipeline default (--oftlm_num_exact)
+        total_memory = vector_size * (num_exact + 12)
     else:
         # Conservative estimate
         total_memory = vector_size * 10

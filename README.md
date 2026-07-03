@@ -1,14 +1,13 @@
 # QED_NLCE
 
 Numerical Linked Cluster Expansion (NLCE) workflows for frustrated quantum
-spin-1/2 models, powered by a **self-contained, symmetry-adapted full dense
-exact diagonalization** core.
+spin-1/2 models (pyrochlore, triangular), powered by the **QED C++ exact
+diagonalization engine** ([ze-bang/QED](https://github.com/ze-bang/QED)).
 
-The diagonalizer is built on `numpy` + `scipy.linalg.eigh` (LAPACK)
-only: there is no link to any external ED binary or library — every
-cluster is diagonalized in-process. Cluster *generation*
-(`qed_nlce.prep`) additionally uses [`pynauty`](https://github.com/pdobsan/pynauty)
-for canonical graph certificates and automorphism counts.
+QED_NLCE owns the NLCE mathematics — cluster generation (via
+[`pynauty`](https://github.com/pdobsan/pynauty) canonical certificates),
+embedding multiplicities, subcluster tables, weighted subtraction,
+resummation — and delegates every cluster diagonalization to `qed`.
 
 ## Install
 
@@ -18,9 +17,10 @@ pip install git+https://github.com/ze-bang/QED_NLCE.git
 pip install .
 ```
 
-Runtime dependencies are `numpy`, `scipy`, `h5py`, `matplotlib`,
-`networkx`, `pandas`, `tqdm`, and `pynauty` (the latter only for the
-cluster-generation step).
+The `qed` C++ package is a **required runtime dependency** for all real
+pipelines (both ED tiers route through it); install it from the sibling
+QED repository. Other runtime dependencies are `numpy`, `scipy`, `h5py`,
+`matplotlib`, `networkx`, `pandas`, `tqdm`, and `pynauty`.
 
 ## Quick start
 
@@ -35,87 +35,90 @@ qed-nlce --geometry pyrochlore --pipeline full_ed --max_order 5 \
          --base_dir output/pyro_full_o5
 ```
 
-Every cluster is solved with the **full eigenvalue spectrum** via
-symmetry-adapted dense diagonalization. Thermodynamics
-(`C(T)`, `E(T)`, `S(T)`, `F(T)`) are computed exactly from that
-spectrum and the per-cluster weights are summed by the NLCE kernel.
+## Two-tier ED dispatch
 
-## Pipeline
+Each cluster is dispatched by its raw Hilbert dimension `2^N` against
+`--oftlm_cutoff` (default `2^18`):
 
-There is a single, noise-free pipeline: `full_ed`. It diagonalizes
-each cluster Hamiltonian exactly using LAPACK (`scipy.linalg.eigh`),
-after blocking the Hilbert space by every available symmetry. Cost is
-`O(D_block^3)` summed over the (much smaller) symmetry blocks rather
-than `O(D^3)` on the full space.
+1. **Exact tier** (`2^N <= cutoff`): full eigenvalue spectrum via
+   `qed.full_spectrum` — auto-detected spatial symmetry (**abelian and
+   non-abelian**, the latter through QED's symmetry-adapted-basis engine
+   with full `d_Γ >= 2` irrep reduction), U(1) total-`S^z`, spin-flip Z2,
+   and time-reversal. The result is mathematically identical to
+   brute-force dense ED (verified to 1e-8 by
+   `tests/test_qed_bridge_parity.py` against the in-repo pure-Python
+   oracle). Thermodynamics (`C(T)`, `E(T)`, `S(T)`, `F(T)`) follow
+   exactly from the spectrum. Pass `--device gpu` for QED's batched GPU
+   block eigensolve.
+2. **OFTLM tier** (`2^N > cutoff`): matrix-free Orthogonalized
+   Finite-Temperature Lanczos (Morita & Tohyama, PRR 2, 013205 (2020))
+   with `--oftlm_num_exact` low-lying states resolved exactly and a
+   stochastic trace over the rest (`--oftlm_num_samples`, error
+   `~ 1/sqrt(R)`). Produces per-cluster `P(T)` curves directly; the
+   summation kernels consume both tiers uniformly, and warn when a
+   stochastic cluster's NLCE weight is cancellation-dominated (the
+   regime where sample noise gets amplified).
 
-## Symmetry blocking
+Per-cluster logs (`qed-bridge` tag) report eigenvalue counts and wall
+time — watch these when pushing `--oftlm_cutoff` up.
 
-The solver exhausts every symmetry the Hamiltonian admits, in this
-order (each reduction provably preserves the full eigenvalue
-multiset):
+## Bond-colored cluster dedup (direction-dependent models)
 
-1. **U(1) total-`S^z` sectors** — applied whenever the Hamiltonian
-   conserves `S^z_total` (auto-detected from the operator terms).
-2. **Spatial automorphisms** — the geometric symmetry group of the
-   cluster graph (respecting complex bond phases) is reduced to a
-   maximal abelian subgroup, and the Hilbert space is decomposed into
-   momentum/character orbit blocks.
-3. **Spin-flip Z2** — when the Hamiltonian is invariant under the
-   global spin flip (auto-detected; broken by a longitudinal field),
-   conjugate `S^z` sectors are merged and split by flip parity.
-4. **Reality / time-reversal** — blocks with no residual imaginary
-   part are diagonalized with the real symmetric LAPACK path.
+For the triangular `kitaev` (JKΓΓ') and `anisotropic` (YbMgGaO4-type)
+models, couplings depend on each bond's lattice direction, so
+**topologically isomorphic embeddings are not isospectral** (a straight
+3-site chain and a 120°-bent one differ at O(0.1|J|)). The generators
+therefore support `--bond_colored`: clusters are deduplicated by
+bond-direction-colored graph isomorphism, canonical modulo the S3 color
+permutations induced by the lattice point group (exact covariances of
+both models). The geometries enable this automatically when
+`--model kitaev|anisotropic`; `xxz_j1j2` keeps the (smaller) purely
+topological cluster sets. See `qed_nlce/prep/_bond_color.py` and
+`tests/test_bond_colored_dedup.py`.
 
-All symmetry reductions are added back together by the framework, so
-the summed spectrum is identical to brute-force dense ED. This is what
-lets the workflow reach higher NLCE order: e.g. for the `N = 12`
-Heisenberg ring the largest dense block shrinks from `4096` to `66`.
+## Robustness for long (order-7/8) runs
 
-```python
-from qed_nlce.ed import solve_spectrum, SpinHalfOperator, OP_SP, OP_SM, OP_SZ
-
-op = SpinHalfOperator(12)
-for i in range(12):
-    j = (i + 1) % 12
-    op.add_two(OP_SZ, i, OP_SZ, j, 1.0)
-    op.add_two(OP_SP, i, OP_SM, j, 0.5)
-    op.add_two(OP_SM, i, OP_SP, j, 0.5)
-
-spectrum = solve_spectrum(op, use_symmetry=True)   # full spectrum, symmetry-adapted
-```
-
-## Backend
-
-Every cluster is diagonalized in-process by the dense core in
-`qed_nlce.core.dense_ed` → `qed_nlce.ed.solve_spectrum`. There is no
-subprocess fork, no MPI, no GPU. Results are written to
-`<ed_dir>/cluster_{id}_order_{o}/output/ed_results.h5` with the full
-sorted spectrum under `/eigendata/eigenvalues` and (optionally)
-thermodynamics under `/thermodynamics/`.
+* **Fail-fast**: `qed` importability is checked at workflow start, not
+  hours in.
+* **Complete-or-abort**: if any cluster's ED fails, the workflow aborts
+  before summation (a partial high-order sum looks deceptively
+  complete). Override with `--allow_incomplete_ed`.
+* **Atomic writes**: `ed_results.h5` is written via temp-file +
+  `os.replace`, so a crash never leaves a truncated file that the
+  summation would silently treat as empty.
+* **Resumable generation**: a `.generation_complete.json` marker lets a
+  restarted run skip the (expensive at high order) cluster-generation
+  step when parameters match.
+* **Content-addressed eigenvalue cache**: keyed on cluster graph hash,
+  Hamiltonian content, temperature grid, and all solver-tier knobs
+  (`oftlm_*`, `device`) — retuning any of them correctly busts the cache.
 
 ## Package layout
 
 | Module | Purpose |
 | --- | --- |
-| `qed_nlce.ed` | Self-contained dense ED core: `SpinHalfOperator`, symmetry analysis, `solve_spectrum`, `thermodynamics`, HDF5/`Trans.dat` I/O. |
+| `qed_nlce.ed` | ED layer: `full_spectrum_qed` (exact tier), `oftlm_thermodynamics` (stochastic tier), `thermodynamics`; plus the pure-Python `solve_spectrum` correctness oracle. |
 | `qed_nlce.hamiltonians` | Cluster file reader + pyrochlore / triangular operator builders. |
-| `qed_nlce.core` | `Geometry` / `Pipeline` abstractions, `NLCEWorkflow` orchestrator, in-process dense bridge (`run_ed_in_process`, `can_run_in_process`). |
+| `qed_nlce.core` | `Geometry` / `Pipeline` abstractions, `NLCEWorkflow` orchestrator, in-process ED dispatch, caches. |
 | `qed_nlce.geometries` | Concrete lattices: `pyrochlore`, `triangular_site`, `triangular_triangle`. |
-| `qed_nlce.pipelines` | The `full_ed` dense pipeline. |
-| `qed_nlce.prep` | Cluster generators (graph enumeration). |
+| `qed_nlce.pipelines` | The `full_ed` pipeline. |
+| `qed_nlce.prep` | Cluster generators (graph enumeration, bond-colored certificates). |
 | `qed_nlce.run` | NLCE summation kernels + per-lattice driver scripts. |
 | `qed_nlce.analysis` | Convergence diagnostics, fitting drivers, plot helpers. |
 | `qed_nlce.cli` / `qed_nlce.__main__` | Unified `qed-nlce` CLI. |
 
-## Benchmark
-
-`scripts/benchmark_symmetry.py` times symmetry-adapted dense ED
-against plain dense ED across Heisenberg-ring sizes and verifies the
-two spectra agree to machine precision:
+## Testing
 
 ```bash
-python scripts/benchmark_symmetry.py --max-n 12
+pytest              # default suite (slow high-order validation excluded)
+pytest -m slow      # order-6..8 generation validation -- run before any
+                    # production order-7/8 campaign
 ```
+
+`tests/test_qed_bridge_parity.py` is the load-bearing guard: it pins the
+QED-backed exact tier against the pure-Python symmetry-adapted oracle
+across Heisenberg/XXZ rings, field-broken and Sz-broken models, and real
+pyrochlore clusters.
 
 ## License
 

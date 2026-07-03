@@ -16,7 +16,13 @@ __all__ = ["thermodynamics", "ThermoResult"]
 
 
 class ThermoResult:
-    """Container for temperature-resolved thermodynamic curves."""
+    """Container for temperature-resolved thermodynamic curves.
+
+    ``std_error`` is ``None`` for exact (full-spectrum) results; for
+    stochastic solvers (OFTLM) it is a dict of per-quantity standard-
+    error arrays (``energy`` / ``specific_heat`` / ``entropy``) from
+    independent-seed resampling.
+    """
 
     __slots__ = (
         "temperatures",
@@ -25,15 +31,17 @@ class ThermoResult:
         "entropy",
         "free_energy",
         "log_Z",
+        "std_error",
     )
 
-    def __init__(self, T, E, C, S, F, logZ):
+    def __init__(self, T, E, C, S, F, logZ, std_error=None):
         self.temperatures = T
         self.energy = E
         self.specific_heat = C
         self.entropy = S
         self.free_energy = F
         self.log_Z = logZ
+        self.std_error = std_error
 
 
 def thermodynamics(

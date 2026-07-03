@@ -54,6 +54,11 @@ class TriangularTriangle(Geometry):
             f"--max_order={order}",
             f"--output_dir={cluster_dir}",
         ]
+        if getattr(args, "model", "xxz_j1j2") in ("kitaev", "anisotropic"):
+            # Direction-dependent couplings: topologically isomorphic
+            # embeddings are NOT isospectral, so dedup must be by
+            # bond-colored isomorphism (more clusters per order).
+            cmd.append("--bond_colored")
         if getattr(args, "visualize", False):
             cmd.append("--visualize")
         else:

@@ -1,26 +1,39 @@
-"""Self-contained dense exact-diagonalization backend for the NLCE
-workflow.
+"""Exact-diagonalization backend for the NLCE workflow.
 
-This module replaces the historical ``qed_backend`` (which dispatched to
-the external ``qed`` C++ package). It runs a single cluster's *full*
-dense diagonalization in-process using :mod:`qed_nlce.ed`:
+Runs a single cluster's ED in-process using :mod:`qed_nlce.ed`, in one
+of two tiers:
 
   * read the per-cluster Hamiltonian (``Trans.dat`` / ``InterAll.dat``),
-  * diagonalize with the symmetry-adapted dense solver
-    (:func:`qed_nlce.ed.solve_spectrum` -- U(1) S^z, spatial
-    automorphisms, spin-flip Z2, and real/TR reduction),
-  * persist the full spectrum to ``<output_dir>/output/ed_results.h5``
-    under ``/eigendata/eigenvalues`` (the on-disk contract the NLCE
-    summation kernels read), plus ``/thermodynamics/*`` when requested.
+  * below ``options.oftlm_cutoff`` (raw Hilbert dim): full EXACT
+    diagonalization via :func:`qed_nlce.ed.qed_bridge.full_spectrum_qed`,
+    which dispatches to ``qed.full_spectrum`` -- U(1) S^z, spatial
+    automorphisms (abelian AND non-abelian, via QED's symmetry-adapted
+    basis engine), spin-flip Z2, and time-reversal reduction, all
+    verified to reproduce the brute-force spectrum
+    (``tests/test_qed_bridge_parity.py``);
+  * above it: matrix-free OFTLM (:func:`qed_nlce.ed.oftlm_thermodynamics`),
+    producing per-cluster thermodynamics directly (no eigenvalue
+    spectrum) for clusters too large to diagonalize exactly even with
+    full symmetry reduction.
 
-There is only one method -- full dense diagonalization -- so
-:func:`can_run_in_process` is always True.
+Both tiers persist to ``<output_dir>/output/ed_results.h5`` (the
+on-disk contract the NLCE summation kernels read) -- eigenvalues under
+``/eigendata/eigenvalues`` for the exact tier, ``/thermodynamics/*``
+for both (opt-in for the exact tier via ``options.thermo``, always-on
+for OFTLM). Writes are atomic (temp file + ``os.replace``) so a crash
+mid-write can never leave a truncated file that the summation kernel
+would silently treat as valid.
+
+The pure-Python solver in :mod:`qed_nlce.ed.dense` / ``.symmetry`` is
+no longer on this runtime path; it remains as the correctness oracle
+for the parity test and existing unit tests.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import uuid
 from typing import Optional
 
 import numpy as np
@@ -32,11 +45,33 @@ try:  # h5py is the on-disk contract with the summation kernels
 except ImportError:  # pragma: no cover
     _HAS_H5PY = False
 
-from ..ed import solve_spectrum, thermodynamics, oftlm_thermodynamics
+from ..ed import thermodynamics, oftlm_thermodynamics
+from ..ed.qed_bridge import full_spectrum_qed
 from ..ed.io import read_operator
 from .ed_runner import EDOptions
 
-__all__ = ["can_run_in_process", "run_ed_in_process"]
+__all__ = ["can_run_in_process", "run_ed_in_process", "assert_qed_available"]
+
+
+def assert_qed_available() -> None:
+    """Fail fast (before any cluster work) if the ``qed`` backend is missing.
+
+    Both ED tiers (exact ``qed.full_spectrum`` and OFTLM) depend on the
+    ``qed`` C++ package. Import it lazily inside a long unattended run
+    and a missing/broken install only surfaces after hours of earlier
+    cluster work; call this once at workflow start instead.
+    """
+    try:
+        import qed  # noqa: F401
+        from qed import _core  # noqa: F401
+    except ImportError as exc:
+        raise ImportError(
+            "The 'qed' C++ package is required for the QED_NLCE exact-ED "
+            "and OFTLM backends (qed_nlce.ed.qed_bridge / qed_nlce.ed.oftlm). "
+            "Install it (see the sibling QED repo) before running any "
+            "pipeline -- failing now rather than after cluster work has "
+            f"already run. Original error: {exc}"
+        ) from exc
 
 
 def can_run_in_process(method: str) -> bool:  # noqa: ARG001 - dense only
@@ -54,6 +89,28 @@ def _temperature_grid(options: EDOptions) -> np.ndarray:
     return np.logspace(np.log10(t_min), np.log10(t_max), bins)
 
 
+def _atomic_h5_write(final_path: str, write_fn) -> None:
+    """Write an HDF5 file atomically: build it at a per-process temp path,
+    then ``os.replace`` onto ``final_path``.
+
+    A crash (or ``kill -9``) mid-write leaves only the orphaned temp file
+    behind -- never a truncated ``final_path`` that the summation kernel's
+    h5py reader would otherwise silently accept as "valid but empty" and
+    cascade-skip every cluster depending on it.
+    """
+    tmp_path = f"{final_path}.tmp-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    try:
+        with h5py.File(tmp_path, "w") as f:
+            write_fn(f)
+        os.replace(tmp_path, final_path)
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def _write_results(
     out_subdir: str,
     eigenvalues: np.ndarray,
@@ -66,7 +123,8 @@ def _write_results(
 
     eig = np.asarray(sorted(eigenvalues), dtype=np.float64)
     h5_path = os.path.join(out_subdir, "ed_results.h5")
-    with h5py.File(h5_path, "w") as f:
+
+    def _write(f):
         grp = f.create_group("eigendata")
         grp.create_dataset("eigenvalues", data=eig)
         grp.attrs["num_eigenvalues"] = len(eig)
@@ -82,6 +140,8 @@ def _write_results(
             tgrp.create_dataset("specific_heat", data=np.asarray(res.specific_heat))
             tgrp.create_dataset("entropy", data=np.asarray(res.entropy))
             tgrp.create_dataset("free_energy", data=np.asarray(res.free_energy))
+
+    _atomic_h5_write(h5_path, _write)
 
 
 def _write_thermo_results(
@@ -101,7 +161,8 @@ def _write_thermo_results(
     if not _HAS_H5PY:
         raise RuntimeError("h5py is required to write ed_results.h5")
     h5_path = os.path.join(out_subdir, "ed_results.h5")
-    with h5py.File(h5_path, "w") as f:
+
+    def _write(f):
         grp = f.create_group("eigendata")
         grp.attrs["num_eigenvalues"] = 0           # spectrum not materialized
         grp.attrs["hilbert_dim"] = int(hilbert_dim)
@@ -113,6 +174,14 @@ def _write_thermo_results(
         tgrp.create_dataset("specific_heat", data=np.asarray(res.specific_heat))
         tgrp.create_dataset("entropy", data=np.asarray(res.entropy))
         tgrp.create_dataset("free_energy", data=np.asarray(res.free_energy))
+        # Independent-seed resampling errors (stochastic solvers only):
+        # the summation kernels use these to decide whether a high-order
+        # NLCE weight is signal or amplified sample noise.
+        if getattr(res, "std_error", None):
+            for prop, arr in res.std_error.items():
+                tgrp.create_dataset(f"std_error_{prop}", data=np.asarray(arr))
+
+    _atomic_h5_write(h5_path, _write)
 
 
 def run_ed_in_process(
@@ -158,18 +227,34 @@ def run_ed_in_process(
         hilbert_dim = 1 << int(num_sites)
         cutoff = int(getattr(options, "oftlm_cutoff", 1 << 15))
         if hilbert_dim <= cutoff:
-            # Small cluster: full dense diagonalization (exact spectrum).
-            evals = solve_spectrum(op, use_symmetry=bool(options.use_symm))
+            # Exact tier: qed.full_spectrum (abelian + non-abelian symmetry,
+            # U(1)-Sz, spin-flip, time-reversal reduction; see qed_bridge.py).
+            evals = full_spectrum_qed(
+                op, device=getattr(options, "device", "cpu"), log_tag=log_tag,
+            )
             _write_results(out_subdir, evals, int(num_sites), options)
         else:
             # Large cluster: matrix-free OFTLM (QED). No eigenvalues -- write the
             # per-cluster P(T) directly on the shared temperature grid.
+            # Seed is a deterministic function of the cluster's Hamiltonian
+            # CONTENT (path-independent, so it is consistent with the
+            # content-addressed cache): reproducible run-to-run, but
+            # INDEPENDENT across clusters. A single global seed would give
+            # same-dimension clusters identical random vectors, making
+            # their stochastic errors correlated -- those add coherently
+            # in the per-order NLCE sum instead of averaging out.
+            import zlib
+            term_sig = (repr(sorted(op.single)) + repr(sorted(op.two))).encode()
+            seed = (zlib.crc32(term_sig)
+                    ^ (int(num_sites) << 16)) & 0x7FFFFFFF or 1
             T = _temperature_grid(options)
             res = oftlm_thermodynamics(
                 op, T,
                 num_exact=int(getattr(options, "oftlm_num_exact", 16)),
                 num_samples=int(getattr(options, "oftlm_num_samples", 20)),
                 krylov_dim=int(getattr(options, "oftlm_krylov_dim", 100)),
+                random_seed=seed,
+                num_seeds=int(getattr(options, "oftlm_num_seeds", 2)),
             )
             _write_thermo_results(out_subdir, res, int(num_sites),
                                   hilbert_dim, method="OFTLM")

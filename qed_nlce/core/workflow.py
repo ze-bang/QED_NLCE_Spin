@@ -38,7 +38,7 @@ import sys
 from dataclasses import dataclass
 from typing import Optional
 
-from .dense_ed import can_run_in_process, run_ed_in_process
+from .dense_ed import assert_qed_available, can_run_in_process, run_ed_in_process
 from .cache import EigenvalueCache, SubclusterCache, default_cache_dir
 from .ed_runner import EDOptions
 from .geometry import Geometry
@@ -134,6 +134,11 @@ class NLCEWorkflow:
         pipeline: Pipeline,
         args: argparse.Namespace,
     ):
+        # Fail fast: both ED tiers (exact qed.full_spectrum + OFTLM) need
+        # the qed C++ package. Check before any cluster work starts, not
+        # lazily on the first large cluster hours into an order-8 run.
+        assert_qed_available()
+
         self.geometry = geometry
         self.pipeline = pipeline
         self.args = args
@@ -267,14 +272,78 @@ class NLCEWorkflow:
 
     # ------------------------------------------------------------ step 1
 
+    # Parameters that determine the cluster set (NOT coupling values --
+    # those only affect the Hamiltonian/ED steps). A marker file with
+    # this payload makes cluster generation resumable: rerunning after a
+    # crash later in the pipeline skips the (expensive at order >= 7)
+    # regeneration instead of silently redoing all of it.
+    def _generation_marker_payload(self) -> dict:
+        return {
+            "geometry": self.geometry.name,
+            "max_order": int(self.args.max_order),
+            # model selects bond-colored dedup on triangular geometries
+            "model": getattr(self.args, "model", None),
+        }
+
     def _step1_clusters(self) -> None:
         logging.info("=" * 80)
         logging.info("Step 1: Cluster generation (%s)", self.geometry.name)
         logging.info("=" * 80)
+
+        import glob
+        import json
+
+        marker = os.path.join(self.cluster_info_dir, ".generation_complete.json")
+        payload = self._generation_marker_payload()
+        sub_info = os.path.join(self.cluster_info_dir, "subclusters_info.txt")
+
+        def _count_cluster_files() -> int:
+            return len(glob.glob(
+                os.path.join(self.cluster_info_dir, "cluster_*_order_*.dat")))
+
+        if os.path.isfile(marker):
+            try:
+                with open(marker) as f:
+                    existing = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                existing = None
+            existing_count = (existing or {}).pop("n_cluster_files", -1) \
+                if isinstance(existing, dict) else -1
+            if existing == payload and os.path.isfile(sub_info) \
+                    and os.path.getsize(sub_info) > 0 \
+                    and _count_cluster_files() == existing_count \
+                    and existing_count > 0:
+                logging.info(
+                    "Cluster generation already complete for %s (%d cluster "
+                    "files, marker matches); skipping. Delete %s to force "
+                    "regeneration.", payload, existing_count, marker,
+                )
+                return
+            logging.info(
+                "Generation marker present but stale/incomplete (marker=%s "
+                "want=%s, files=%d recorded=%d); regenerating.",
+                existing, payload, _count_cluster_files(), existing_count,
+            )
+
         ok = self.geometry.generate_clusters(self.args, self.args.max_order, self.cluster_dir)
         if not ok:
             logging.error("Cluster generation failed for geometry=%s", self.geometry.name)
             sys.exit(1)
+
+        # Success marker (written AFTER all generator outputs, so a crash
+        # mid-generation never leaves a marker claiming completeness).
+        # Records the cluster-file count so partial deletions are detected
+        # on the next run instead of silently truncating the NLCE sum.
+        try:
+            os.makedirs(self.cluster_info_dir, exist_ok=True)
+            record = dict(payload)
+            record["n_cluster_files"] = _count_cluster_files()
+            tmp = f"{marker}.tmp-{os.getpid()}"
+            with open(tmp, "w") as f:
+                json.dump(record, f)
+            os.replace(tmp, marker)
+        except OSError as exc:
+            logging.warning("Could not write generation marker: %s", exc)
         # Subcluster-table cache: if we just regenerated and the
         # generator wrote subclusters_info.txt, persist it. If the
         # generator skipped that step (or its output is empty), try
@@ -416,26 +485,54 @@ class NLCEWorkflow:
 
         use_mpi = bool(getattr(self.args, "mpi", False)) and mpi_available()
 
+        failed_tags: list[str] = []
         if use_mpi:
+            # Cost-aware scatter_ed_jobs (mpi_dispatch.py) returns only an
+            # aggregate count today -- per-cluster failure tags aren't
+            # tracked across ranks. The require-complete gate below still
+            # catches an incomplete sum, just without naming the culprits.
             n_ok = self._run_ed_mpi(jobs)
         elif not parallel_enabled or ed_workers == 1:
-            n_ok = self._run_ed_serial(jobs)
+            n_ok, failed_tags = self._run_ed_serial(jobs)
         else:
-            n_ok = self._run_ed_parallel(jobs, ed_workers)
+            n_ok, failed_tags = self._run_ed_parallel(jobs, ed_workers)
 
         logging.info("ED: %d / %d clusters succeeded", n_ok, n_total)
         self.eig_cache.log_summary("eig-cache")
         self.subcluster_cache.log_summary("subcluster-cache")
 
+        if n_ok < n_total and not bool(getattr(self.args, "allow_incomplete_ed", False)):
+            if failed_tags:
+                logging.error(
+                    "ED step incomplete (%d / %d clusters failed): %s",
+                    n_total - n_ok, n_total, ", ".join(failed_tags),
+                )
+            else:
+                logging.error(
+                    "ED step incomplete (%d / %d clusters failed); see ED "
+                    "worker errors above for details.",
+                    n_total - n_ok, n_total,
+                )
+            logging.error(
+                "Aborting before NLCE summation -- a partial order-%d sum "
+                "would silently look complete. Pass --allow_incomplete_ed "
+                "to proceed anyway (e.g. for exploratory runs).",
+                self.args.max_order,
+            )
+            sys.exit(1)
+
     # ---- serial / parallel ED dispatch helpers ----
 
-    def _run_ed_serial(self, jobs: list[tuple[ClusterEntry, _EDPayload]]) -> int:
+    def _run_ed_serial(
+        self, jobs: list[tuple[ClusterEntry, _EDPayload]]
+    ) -> tuple[int, list[str]]:
         try:
             from tqdm import tqdm
             iterable = tqdm(jobs, desc="ED in-process")
         except ImportError:
             iterable = jobs
         n_ok = 0
+        failed_tags: list[str] = []
         for _cluster, payload in iterable:
             ok = run_ed_in_process(
                 payload.ham_subdir, payload.ed_subdir, payload.num_sites,
@@ -445,13 +542,30 @@ class NLCEWorkflow:
             )
             if ok:
                 n_ok += 1
-        return n_ok
+            else:
+                failed_tags.append(payload.log_tag)
+        return n_ok, failed_tags
 
     def _run_ed_parallel(
         self,
         jobs: list[tuple[ClusterEntry, _EDPayload]],
         ed_workers: int,
-    ) -> int:
+    ) -> tuple[int, list[str]]:
+        # GPU oversubscription guard: N spawn workers x 1 GPU = N CUDA
+        # contexts fighting for the same device memory -- OOM/context
+        # thrash on exactly the biggest clusters. Serialize unless the
+        # user explicitly claims multiple GPUs / MPS via env override.
+        device = str(getattr(self.args, "device", "cpu")).lower()
+        if device == "gpu" and ed_workers > 1 \
+                and os.environ.get("QED_NLCE_GPU_PARALLEL") != "1":
+            logging.warning(
+                "--device gpu with %d parallel workers would create %d "
+                "competing CUDA contexts on one GPU; forcing 1 worker. "
+                "Set QED_NLCE_GPU_PARALLEL=1 to override (multi-GPU/MPS).",
+                ed_workers, ed_workers,
+            )
+            ed_workers = 1
+
         # Pick BLAS/OMP threads-per-worker so total threads ~= num_cores.
         total_cores = int(getattr(self.args, "num_cores", 1) or 1)
         omp_threads = max(1, total_cores // ed_workers)
@@ -461,11 +575,13 @@ class NLCEWorkflow:
             ed_workers, omp_threads, len(jobs),
         )
 
-        # Spawn (NOT fork) so each worker boots a fresh interpreter with
-        # OMP/MKL/CUDA in a clean state. Forking after qed/CUDA/MKL has
-        # been initialised in the parent is unsafe (CUDA driver state
-        # is per-process; MKL spawns its own threads pre-fork).
-        ctx = multiprocessing.get_context("spawn")
+        # Largest-first submission: with unordered completion, scheduling
+        # the most expensive cluster last would extend the wall clock by
+        # its full runtime; front-loading it overlaps it with the swarm
+        # of small clusters.
+        payloads = sorted(
+            (p for (_c, p) in jobs), key=lambda p: -p.num_sites,
+        )
 
         try:
             from tqdm import tqdm
@@ -473,28 +589,60 @@ class NLCEWorkflow:
         except ImportError:
             pbar = None
 
+        # ProcessPoolExecutor over a spawn context (fresh OMP/MKL/CUDA
+        # state per worker, workers persist across tasks). Unlike
+        # multiprocessing.Pool, a worker that dies abruptly (native
+        # segfault in the C++ solver, OOM-kill) raises
+        # BrokenProcessPool here instead of hanging imap_unordered
+        # forever -- essential for unattended multi-day runs.
+        import concurrent.futures as cf
+
+        ctx = multiprocessing.get_context("spawn")
         n_ok = 0
-        payloads = [p for (_c, p) in jobs]
-        with ctx.Pool(
-            processes=ed_workers,
-            initializer=_ed_pool_initializer,
-            initargs=(omp_threads,),
-        ) as pool:
-            # imap_unordered for live progress + early failure visibility.
-            for tag, ok, err in pool.imap_unordered(
-                _ed_worker, payloads, chunksize=1,
-            ):
-                if ok:
-                    n_ok += 1
-                else:
-                    logging.error(
-                        "ED worker %s failed%s", tag, f": {err}" if err else "",
-                    )
-                if pbar is not None:
-                    pbar.update(1)
-        if pbar is not None:
-            pbar.close()
-        return n_ok
+        failed_tags: list[str] = []
+        completed_tags: set[str] = set()
+        try:
+            with cf.ProcessPoolExecutor(
+                max_workers=ed_workers,
+                mp_context=ctx,
+                initializer=_ed_pool_initializer,
+                initargs=(omp_threads,),
+            ) as pool:
+                fut_to_tag = {
+                    pool.submit(_ed_worker, p): p.log_tag for p in payloads
+                }
+                for fut in cf.as_completed(fut_to_tag):
+                    try:
+                        tag, ok, err = fut.result()
+                    except cf.process.BrokenProcessPool:
+                        raise
+                    except Exception as exc:  # worker-side pickling etc.
+                        tag, ok, err = fut_to_tag[fut], False, str(exc)
+                    completed_tags.add(tag)
+                    if ok:
+                        n_ok += 1
+                    else:
+                        failed_tags.append(tag)
+                        logging.error(
+                            "ED worker %s failed%s",
+                            tag, f": {err}" if err else "",
+                        )
+                    if pbar is not None:
+                        pbar.update(1)
+        except cf.process.BrokenProcessPool:
+            logging.error(
+                "A parallel ED worker process died abruptly (native crash "
+                "or OOM kill). Completed clusters are preserved on disk; "
+                "rerun to resume via the eigenvalue cache. Marking all "
+                "unfinished clusters as failed."
+            )
+            for p in payloads:
+                if p.log_tag not in completed_tags:
+                    failed_tags.append(p.log_tag)
+        finally:
+            if pbar is not None:
+                pbar.close()
+        return n_ok, failed_tags
 
     def _run_ed_mpi(self, jobs: list[tuple[ClusterEntry, _EDPayload]]) -> int:
         """Distribute ED jobs across MPI ranks with cost-aware scheduling."""
@@ -532,8 +680,40 @@ class NLCEWorkflow:
             logging.info("Pipeline %s declared no summation step.", self.pipeline.name)
             return
         logging.info("Running: %s", " ".join(cmd))
+        # Tee the kernel's stdout/stderr into a persistent log: the
+        # summation prints load-bearing diagnostics (OFTLM cancellation
+        # warnings, temp-grid clamp warnings, SKIPPED clusters) that
+        # would otherwise be lost in nohup/slurm runs. Also surface any
+        # WARNING lines into the workflow log.
+        sum_log = os.path.join(self.nlc_dir, "summation.log")
         try:
-            subprocess.run(cmd, check=True)
-            logging.info("NLCE summation completed.")
+            proc = subprocess.run(
+                cmd, check=True, capture_output=True, text=True,
+            )
+            with open(sum_log, "w") as f:
+                f.write(proc.stdout)
+                if proc.stderr:
+                    f.write("\n===== STDERR =====\n")
+                    f.write(proc.stderr)
+            n_warn = 0
+            for line in proc.stdout.splitlines():
+                if "WARNING" in line:
+                    logging.warning("summation: %s", line.strip())
+                    n_warn += 1
+            logging.info(
+                "NLCE summation completed (%d warnings; full output: %s).",
+                n_warn, sum_log,
+            )
         except subprocess.CalledProcessError as e:
-            logging.error("NLCE summation failed: %s", e)
+            with open(sum_log, "w") as f:
+                f.write(e.stdout or "")
+                f.write("\n===== STDERR =====\n")
+                f.write(e.stderr or "")
+            logging.error(
+                "NLCE summation FAILED (exit %s). Output: %s\nLast stderr:\n%s",
+                e.returncode, sum_log,
+                "\n".join((e.stderr or "").splitlines()[-15:]),
+            )
+            # A dead summation must not masquerade as a completed workflow
+            # (unattended monitors key on the exit code).
+            sys.exit(1)

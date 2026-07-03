@@ -4,11 +4,16 @@ Tests:
 - Cluster counts per order against published values (triangular + pyrochlore)
 - NLCE subcluster subtraction sanity (W(single-site)=P, high-T limit)
 - Multiplicity sum rule
+- High-order (5-8) validation: lattice-size invariance (pyrochlore) and
+  reference counts/Sum-L (triangle-based generator). Orders whose
+  generation takes >1 min are marked ``slow``; run ``pytest -m slow``
+  before any production order-7/8 campaign.
 """
 from __future__ import annotations
 
 import sys
 from collections import Counter, defaultdict
+from fractions import Fraction
 from pathlib import Path
 
 import networkx as nx
@@ -29,6 +34,11 @@ from qed_nlce.prep.generate_pyrochlore_clusters import (
     generate_clusters as gen_pyrochlore,
     identify_subclusters as sub_pyrochlore,
     compute_automorphism_count as aut_pyrochlore,
+)
+from qed_nlce.prep.generate_triangle_nlce_clusters import (
+    create_triangular_lattice_with_triangles,
+    build_triangle_meta_graph,
+    generate_triangle_clusters,
 )
 
 
@@ -51,12 +61,55 @@ TRIANGULAR_EXPECTED_COUNTS = {
 }
 
 # Diamond/pyrochlore lattice: cluster counts for z=4 connectivity
-# (number of connected graphs of n nodes embeddable in z=4 graph)
+# (number of connected graphs of n nodes embeddable in z=4 graph).
+# Orders 5-6 verified by generation on two lattice sizes (L=7/8 for
+# order 5, L=8/9 for order 6 -- identical counts + multiplicity
+# multisets, ruling out PBC wraparound artifacts): order 5 = the 3 free
+# trees with max degree <= 4 (path, fork, K_{1,4}); order 6 = the 5
+# such trees + the hexagonal loop (diamond-lattice girth is 6, so
+# order 6 is the first order with a cycle topology).
 PYROCHLORE_EXPECTED_COUNTS = {
     1: 1,
     2: 1,
     3: 1,
     4: 2,
+    5: 3,
+    6: 6,
+    # Orders 7-8: generated on L=10, verified identical on L=11
+    # (test_order7_and_8_invariant, 2026-07-03).
+    7: 10,
+    8: 24,
+}
+
+# Multiplicity (L_pyro) multisets per order, verified lattice-size
+# invariant as above. A wraparound or dedup bug shifts these before it
+# shifts the topology count.
+PYROCHLORE_EXPECTED_MULTS = {
+    1: [0.5],
+    2: [1.0],
+    3: [3.0],
+    4: [2.0, 9.0],
+    5: [0.5, 18.0, 27.0],
+    6: [1.0, 6.0, 9.0, 54.0, 54.0, 75.0],
+    7: [6.0, 12.0, 18.0, 27.0, 27.0, 54.0, 108.0, 138.0, 213.0, 300.0],
+    8: [1.0, 1.5, 6.0, 12.0, 18.0, 24.0, 24.0, 36.0, 36.0, 42.0, 54.0,
+        54.0, 54.0, 57.0, 150.0, 162.0, 276.0, 276.0, 300.0, 402.0,
+        414.0, 426.0, 591.0, 780.0],
+}
+
+# Triangle-based NLCE reference values from the generator docstring
+# (generate_triangle_nlce_clusters.py): order -> (num_clusters, Sum-L).
+# Orders 1-8 reproduced by generation on the default L = order+3
+# lattice (order 8: 299 clusters, Sum-L = 5563, ~105 s).
+TRIANGLE_BASED_REFERENCE = {
+    1: (1, Fraction(1, 3)),
+    2: (1, Fraction(1)),
+    3: (3, Fraction(11, 3)),
+    4: (5, Fraction(44, 3)),
+    5: (12, Fraction(62)),
+    6: (35, Fraction(814, 3)),
+    7: (98, Fraction(3652, 3)),
+    8: (299, Fraction(5563)),
 }
 
 
@@ -113,20 +166,38 @@ class TestTriangularClusterCounts:
 class TestPyrochloreClusterCounts:
     """Verify pyrochlore cluster counts against known values."""
 
+    FIXTURE_MAX_ORDER = 5  # order 6 takes ~30 s -> covered by the slow tests
+
     @pytest.fixture(scope="class")
     def pyrochlore_data(self):
-        lattice, pos, tetrahedra = create_pyrochlore_lattice(5, periodic=True)
+        lattice, pos, tetrahedra = create_pyrochlore_lattice(7, periodic=True)
         tet_graph = build_tetrahedron_graph(tetrahedra)
-        clusters, mults, details = gen_pyrochlore(tet_graph, 4)
+        clusters, mults, details = gen_pyrochlore(tet_graph, self.FIXTURE_MAX_ORDER)
         return tet_graph, clusters, mults, details
 
     def test_order_counts(self, pyrochlore_data):
         tet_graph, clusters, mults, details = pyrochlore_data
         order_counts = Counter(len(c) for c in clusters)
         for order, expected in PYROCHLORE_EXPECTED_COUNTS.items():
+            if order > self.FIXTURE_MAX_ORDER:
+                continue
             actual = order_counts.get(order, 0)
             assert actual == expected, (
                 f"Order {order}: expected {expected} clusters, got {actual}"
+            )
+
+    def test_multiplicity_multisets(self, pyrochlore_data):
+        """L_pyro multisets per order must match the verified reference."""
+        _, clusters, mults, _ = pyrochlore_data
+        by_order = defaultdict(list)
+        for c, m in zip(clusters, mults):
+            by_order[len(c)].append(round(m, 6))
+        for order, expected in PYROCHLORE_EXPECTED_MULTS.items():
+            if order > self.FIXTURE_MAX_ORDER:
+                continue
+            assert sorted(by_order[order]) == expected, (
+                f"Order {order}: multiplicity multiset {sorted(by_order[order])} "
+                f"!= expected {expected}"
             )
 
     def test_single_tet_multiplicity(self, pyrochlore_data):
@@ -231,3 +302,97 @@ class TestMultiplicitySumRule:
             assert raw_count == pytest.approx(round(raw_count), abs=1e-10), (
                 f"Cluster {i}: L_pyro*N*2 = {raw_count} is not integer"
             )
+
+
+# ---------------------------------------------------------------------------
+# High-order validation (orders 5-8) -- the range an order-8 NLCE campaign
+# actually depends on. Nothing below relies on an external table alone:
+# the triangle-based numbers were reproduced by generation before being
+# frozen here, and the pyrochlore checks assert lattice-size INVARIANCE
+# (a PBC-wraparound or dedup bug shifts counts/multiplicities between
+# lattice sizes before anything else).
+# ---------------------------------------------------------------------------
+
+
+def _triangle_based_counts(max_order: int):
+    """Generate triangle-based clusters; return {order: (count, Sum-L)}."""
+    L = max_order + 3  # generator main()'s default sizing
+    _, _, triangles, _, _ = create_triangular_lattice_with_triangles(L)
+    meta_graph, _ = build_triangle_meta_graph(triangles, L)
+    _, mults, orders = generate_triangle_clusters(meta_graph, triangles, max_order)
+    counts = Counter(orders)
+    sums = defaultdict(Fraction)
+    for m, o in zip(mults, orders):
+        sums[o] += m
+    return {o: (counts[o], sums[o]) for o in counts}
+
+
+class TestTriangleBasedReferenceCounts:
+    """Triangle-based generator vs its own (now enforced) reference table."""
+
+    def test_orders_1_to_6(self):
+        got = _triangle_based_counts(6)
+        for order in range(1, 7):
+            assert got[order] == TRIANGLE_BASED_REFERENCE[order], (
+                f"Order {order}: (count, Sum-L) = {got[order]} != "
+                f"reference {TRIANGLE_BASED_REFERENCE[order]}"
+            )
+
+    @pytest.mark.slow
+    def test_orders_7_and_8(self):
+        got = _triangle_based_counts(8)
+        for order in (7, 8):
+            assert got[order] == TRIANGLE_BASED_REFERENCE[order], (
+                f"Order {order}: (count, Sum-L) = {got[order]} != "
+                f"reference {TRIANGLE_BASED_REFERENCE[order]}"
+            )
+
+
+def _pyrochlore_signature(L: int, max_order: int):
+    """Per-order (count, sorted multiplicities) signature for invariance checks."""
+    _, _, tetrahedra = create_pyrochlore_lattice(L, periodic=True)
+    tet_graph = build_tetrahedron_graph(tetrahedra)
+    clusters, mults, _ = gen_pyrochlore(tet_graph, max_order)
+    sig = defaultdict(list)
+    for c, m in zip(clusters, mults):
+        sig[len(c)].append(round(m, 6))
+    return {o: (len(v), sorted(v)) for o, v in sig.items()}
+
+
+class TestPyrochloreLatticeSizeInvariance:
+    """Counts + multiplicities must not depend on the PBC cell size.
+
+    This is the strongest table-free self-consistency check available:
+    wraparound artifacts (the classic high-order generation failure when
+    the periodic cell is too small for the cluster diameter) produce
+    different counts/multiplicities on different lattice sizes.
+    """
+
+    def test_order5_invariant(self):
+        assert _pyrochlore_signature(7, 5) == _pyrochlore_signature(8, 5)
+
+    @pytest.mark.slow
+    def test_order6_invariant(self):
+        sig8 = _pyrochlore_signature(8, 6)
+        sig9 = _pyrochlore_signature(9, 6)
+        assert sig8 == sig9
+        # And pin against the frozen reference so a symmetric-but-wrong
+        # change (same bug on both sizes) is still caught.
+        assert sig8[6][0] == PYROCHLORE_EXPECTED_COUNTS[6]
+        assert sig8[6][1] == PYROCHLORE_EXPECTED_MULTS[6]
+
+    @pytest.mark.slow
+    def test_order7_and_8_invariant(self):
+        """Order-7/8 pyrochlore generation: lattice-size invariance AND
+        agreement with the frozen reference (recorded from the first
+        passing L=10/L=11 run, 2026-07-03: order 7 = 10 topologies,
+        order 8 = 24)."""
+        sig_a = _pyrochlore_signature(10, 8)
+        sig_b = _pyrochlore_signature(11, 8)
+        assert sig_a == sig_b, (
+            "Order-8 pyrochlore cluster generation depends on the PBC "
+            f"cell size: L=10 -> {sig_a}, L=11 -> {sig_b}"
+        )
+        for order in (7, 8):
+            assert sig_a[order][0] == PYROCHLORE_EXPECTED_COUNTS[order]
+            assert sig_a[order][1] == PYROCHLORE_EXPECTED_MULTS[order]

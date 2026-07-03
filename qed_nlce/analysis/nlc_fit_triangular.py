@@ -1078,6 +1078,11 @@ def main():
             '--output_dir', os.path.join(args.work_dir, f'clusters_order_{args.max_order}'),
             '--no_visualize',
         ]
+        if args.model in ('kitaev', 'anisotropic'):
+            # Direction-dependent couplings need bond-colored cluster
+            # dedup: topologically isomorphic embeddings (straight vs
+            # bent chains, ...) are NOT isospectral for these models.
+            cluster_gen_cmd.append('--bond_colored')
         subprocess.run(cluster_gen_cmd, check=True)
         fixed_params["skip_cluster_gen"] = True
     

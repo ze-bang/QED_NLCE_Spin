@@ -140,6 +140,11 @@ class TriangularSite(Geometry):
             f"--max_order={order}",
             f"--output_dir={cluster_dir}",
         ]
+        if getattr(args, "model", "xxz_j1j2") in ("kitaev", "anisotropic"):
+            # Direction-dependent couplings: topologically isomorphic
+            # embeddings are NOT isospectral (straight vs bent chains
+            # differ), so dedup must be by bond-colored isomorphism.
+            cmd.append("--bond_colored")
         if getattr(args, "visualize", False):
             cmd.append("--visualize")
         logging.info("Running: %s", " ".join(cmd))
