@@ -52,6 +52,17 @@ class FullEDPipeline(Pipeline):
                             "instead of exact dense ED (default 32768 = 2^15). "
                             "Raise to force exact ED on larger clusters when the "
                             "symmetry-reduced sectors are still small.")
+        g.add_argument("--oftlm_num_exact", type=int, default=16,
+                       help="OFTLM: number of lowest eigenstates treated exactly. "
+                            "Must be large enough to cover the thermally-relevant "
+                            "low-energy states at the lowest T, or NLCE weights on "
+                            "large clusters are corrupted (default 16).")
+        g.add_argument("--oftlm_num_samples", type=int, default=20,
+                       help="OFTLM: number of random vectors (FTLM trace estimate); "
+                            "statistical error ~1/sqrt(R) (default 20).")
+        g.add_argument("--oftlm_krylov_dim", type=int, default=100,
+                       help="OFTLM: Lanczos/Krylov dimension per random vector "
+                            "(default 100).")
 
     # ------------------------------------------------------------ ED config
 
@@ -86,6 +97,9 @@ class FullEDPipeline(Pipeline):
             streaming_symmetry=streaming_symmetry,
             basis_cache_dir=None,
             oftlm_cutoff=getattr(args, "oftlm_cutoff", 1 << 15),
+            oftlm_num_exact=getattr(args, "oftlm_num_exact", 16),
+            oftlm_num_samples=getattr(args, "oftlm_num_samples", 20),
+            oftlm_krylov_dim=getattr(args, "oftlm_krylov_dim", 100),
         )
 
     def needs_thermo(self, args: argparse.Namespace) -> bool:
