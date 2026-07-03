@@ -1,0 +1,61 @@
+NdMgAl11O19 — NLCE fitting strategy (triangle-based expansion)
+================================================================
+
+1) What the .dat files look like
+--------------------------------
+All curves are log-spaced in T with ~68–74 points / decade band.
+
+0 T: Cm drops from ~2.9 J/mol/K at 0.06 K toward ~0.07 at 10 K. The
+    ultra-low-T peak is dominated by hyperfine / crystal-field Schottky
+    structure; NLCE truncation error is large below ~0.15–0.2 K (see prior
+    campaign notes in configs/*.json).
+
+1 T: A resolved Schottky bump: Cm rises to ~3.3 J/mol/K near 1 K then falls.
+    This window (0.5–2 K in production configs) carries far more shape
+    information per point than the 0 T tail.
+
+3 T, 5 T, 7 T: peaks move to higher T and narrow; exchange sensitivity in
+    the tabulated band is weaker than 1 T for the purpose of constraining
+    frustrated-exchange models (also matches your phase-1 decision to drop
+    them).
+
+2) 0 T only vs finite field
+----------------------------
+* 0 T [0.2, 0.5] K alone: only ~7 points, mostly monotonic tail — good for
+  checking the overall energy scale, weak for telling J1–J2 Heisenberg from
+  bond-anisotropic models.
+
+* 0 T + 1 T (recommended default in NdMgAl_production_0T_1T.json):
+  - 0 T tail still anchors the low-T scale in an NLCE-convergent window.
+  - 1 T Schottky adds amplitude + peak position + width → much stronger
+    constraints on anisotropy and g_tensor usage (g_ab, g_c fixed from
+    magnetization in the fitter CLI).
+
+3) Model semantics in nlc_fit_triangular.py
+---------------------------------------------
+* --model xxz_j1j2
+    Triangular-lattice Hamiltonian written in the J1 (nn) + J2 (n.n.n.)
+    convention used by the NLCE runner, with optional --fit_Jz_ratio for
+    XXZ anisotropy (Jxy/Jz).
+
+* --model anisotropic
+    YbMgGaO4-type bond-directional exchanges (Jzz, Jpm, Jpmpm, Jzpm).
+    Setting Jpmpm = Jzpm = 0 recovers the “XXZ in anisotropic coordinates”
+    slice used in your stage-1/2 XXZ scripts — NOT the same Hilbert-space
+    Hamiltonian as xxz_j1j2 unless parameters map to a symmetry-related
+    point.
+
+4) Production workflow (recommended)
+------------------------------------
+A) Same NLCE order and resummation for both models (apples-to-apples χ²):
+   ORDER=8, --resummation wynn_multi, --symm_threshold 9,
+   --ed_method FULL (default in run_production_nlce_triangular_fit.sh) or
+   AUTO once `qed` is rebuilt with CUDA on GPU nodes.
+
+B) Run Bayesian fits with generous n_initial on the 4D anisotropic model;
+   for xxz_j1j2 start with 2D (J1,J2) or 3D with --fit_Jz_ratio.
+
+C) Compare best χ², residuals vs T per dataset, and physical plausibility
+   (signs, magnitudes vs CW).
+
+Use: bash run_production_nlce_triangular_fit.sh (see NdMgAl_NLCE/scripts).

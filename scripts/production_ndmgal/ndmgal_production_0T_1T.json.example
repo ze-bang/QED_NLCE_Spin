@@ -1,0 +1,26 @@
+{
+    "description": "NdMgAl11O19 — production NLCE fitting: 0 T tail + 1 T Schottky (triangle-based expansion, same physics as phase-1 v2).",
+    "note_0T": "0 T, T in [0.2, 0.5] K: only ~7 points; C(T) is a gently falling high-T tail of the Schottky anomaly. NLCE is convergent here (avoid T < 0.15 K where truncation bites). Use weight 1 as a mild scale/curvature anchor.",
+    "note_1T": "1 T, T in [0.5, 2.0] K: ~11 points; strong Schottky structure (C peaks ~3.3 J/mol/K). Much higher sensitivity to exchange anisotropy and g_c. Weight 3 (same ratio as legacy phase-1). h = 0.67171 K in code units (matches NdMgAl_phase1_order6.sh).",
+    "note_models": "Compare (i) xxz_j1j2 = triangular-lattice J1–J2 Heisenberg/XXZ stack (J1 nn, J2 n.n.n.) vs (ii) anisotropic = bond-directional Jzz,Jpm,Jpmpm,Jzpm (YbMgGaO4-type) on the same datasets. Same C(T) windows → comparable chi-squared.",
+    "datasets": [
+        {
+            "file": "NdMgAl_NLCE/data/NdMgAl_specific_heat_0T_10K.dat",
+            "h": 0.0,
+            "field_dir": [0, 0, 1],
+            "weight": 1.0,
+            "label": "0 T",
+            "temp_min": 0.2,
+            "temp_max": 0.5
+        },
+        {
+            "file": "NdMgAl_NLCE/data/NdMgAl_specific_heat_1T_10K.dat",
+            "h": 0.67171,
+            "field_dir": [0, 0, 1],
+            "weight": 3.0,
+            "label": "1 T",
+            "temp_min": 0.5,
+            "temp_max": 2.0
+        }
+    ]
+}

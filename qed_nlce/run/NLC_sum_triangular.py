@@ -125,6 +125,12 @@ class NLCExpansionTriangular:
                 'num_vertices': num_vertices,
                 'file_path': file_path,
                 'eigenvalues': None,
+                # Pre-computed per-cluster thermodynamics (energy/specific_heat/
+                # entropy on self.temp_values). Populated by read_eigenvalues
+                # ONLY when the cluster has no full eigenvalue spectrum on disk
+                # (stochastic ED: KPM_DOS / FTLM write thermo directly instead
+                # of a complete spectrum). See _read_thermo_from_h5.
+                'thermo': None,
             }
     
     def read_eigenvalues(self):
@@ -141,9 +147,22 @@ class NLCExpansionTriangular:
             if HAS_H5PY and os.path.exists(h5_file):
                 try:
                     with h5py.File(h5_file, 'r') as f:
-                        if '/eigendata/eigenvalues' in f:
+                        # Preferred: a complete eigenvalue spectrum (exact ED:
+                        # FULL / FULL_SYMMETRIZED / FULL_SZ_DECOMPOSED). The
+                        # summation derives thermodynamics from it directly.
+                        if ('/eigendata/eigenvalues' in f and
+                                f['/eigendata/eigenvalues'].shape is not None and
+                                f['/eigendata/eigenvalues'].size > 0):
                             eigenvalues = f['/eigendata/eigenvalues'][:]
                             self.clusters[cluster_id]['eigenvalues'] = np.array(eigenvalues)
+                            continue
+                        # Fallback: pre-computed thermodynamics from a stochastic
+                        # backend (KPM_DOS / FTLM) that does NOT emit a full
+                        # spectrum. Read C/E/S directly and interpolate onto the
+                        # summation temperature grid.
+                        thermo = self._read_thermo_from_h5(f)
+                        if thermo is not None:
+                            self.clusters[cluster_id]['thermo'] = thermo
                             continue
                 except Exception as e:
                     print(f"Warning: Error reading HDF5 file for cluster {cluster_id}: {e}")
@@ -156,7 +175,81 @@ class NLCExpansionTriangular:
                 self.clusters[cluster_id]['eigenvalues'] = np.array(eigenvalues)
                 continue
             
-            print(f"Warning: Eigenvalue data not found for cluster {cluster_id}")
+            print(f"Warning: Eigenvalue/thermo data not found for cluster {cluster_id}")
+
+    def _read_thermo_from_h5(self, f):
+        """Read pre-computed per-cluster thermodynamics from a stochastic-ED
+        HDF5 file and interpolate onto ``self.temp_values``.
+
+        Stochastic backends (KPM_DOS, FTLM) do not write a complete eigenvalue
+        spectrum; instead they emit total-extensive, dimensionless (k_B=1)
+        thermodynamic curves on their own temperature grid. We locate that grid
+        + the energy / specific_heat / entropy datasets, then resample onto the
+        summation grid so the Möbius subtraction can treat these clusters
+        identically to eigenvalue-based ones.
+
+        Returns a dict ``{energy, specific_heat, entropy}`` (each an array over
+        ``self.temp_values``) with SI scaling applied to match
+        :meth:`calculate_thermodynamic_quantities`, or ``None`` if no thermo
+        group is present.
+        """
+        # Candidate dataset locations, in priority order. The C++ thermal
+        # orchestrator writes the averaged curves under "ftlm/averaged/"
+        # (generic group name, used for all thermal methods incl. KPM_DOS),
+        # and a recombined copy under "thermodynamics/" for the Sz-decomposed
+        # path.
+        group_candidates = ["thermodynamics", "ftlm/averaged"]
+        T_names = ["temperatures", "temperature", "T"]
+        field_map = {
+            "energy": ["energy", "internal_energy", "E"],
+            "specific_heat": ["specific_heat", "C", "heat_capacity"],
+            "entropy": ["entropy", "S"],
+        }
+
+        for grp_name in group_candidates:
+            if grp_name not in f:
+                continue
+            grp = f[grp_name]
+            # locate temperature axis
+            T_src = None
+            for tn in T_names:
+                if tn in grp and grp[tn].size > 0:
+                    T_src = np.asarray(grp[tn][:], dtype=float)
+                    break
+            if T_src is None:
+                continue
+            quantities = {}
+            ok = True
+            for prop, names in field_map.items():
+                arr = None
+                for nm in names:
+                    if nm in grp and grp[nm].size == T_src.size:
+                        arr = np.asarray(grp[nm][:], dtype=float)
+                        break
+                if arr is None:
+                    ok = False
+                    break
+                quantities[prop] = arr
+            if not ok:
+                continue
+
+            # Interpolate onto the summation grid. Sort the source by T to be
+            # safe; clamp out-of-range queries to the endpoints (np.interp
+            # default) — the runner uses the same temp_min/temp_max for ED and
+            # summation so this only matters at the rounding edges.
+            order = np.argsort(T_src)
+            T_src = T_src[order]
+            result = {}
+            R = 6.02214076e23 * 1.380649e-23  # 8.314462618 J/(mol·K)
+            for prop in field_map:
+                vals = quantities[prop][order]
+                interp = np.interp(self.temp_values, T_src, vals)
+                if self.SI:
+                    interp = interp * R
+                result[prop] = interp
+            return result
+
+        return None
     
     def read_subcluster_info(self):
         """Read subcluster information from the provided file."""
@@ -323,8 +416,10 @@ class NLCExpansionTriangular:
         self.valid_weights = set()
         
         for cluster_id, order in sorted_clusters:
-            if self.clusters[cluster_id]['eigenvalues'] is None:
-                print(f"  Cluster {cluster_id} (order {order}): SKIPPED (no eigenvalues)")
+            has_eig = self.clusters[cluster_id]['eigenvalues'] is not None
+            has_thermo = self.clusters[cluster_id].get('thermo') is not None
+            if not has_eig and not has_thermo:
+                print(f"  Cluster {cluster_id} (order {order}): SKIPPED (no eigenvalues/thermo)")
                 continue
             
             subclusters = self.get_subclusters(cluster_id)
@@ -338,9 +433,14 @@ class NLCExpansionTriangular:
                 print(f"  Cluster {cluster_id} (order {order}): SKIPPED - missing weights for {missing_subclusters}")
                 continue
                 
-            quantities = self.calculate_thermodynamic_quantities(
-                self.clusters[cluster_id]['eigenvalues']
-            )
+            if has_eig:
+                quantities = self.calculate_thermodynamic_quantities(
+                    self.clusters[cluster_id]['eigenvalues']
+                )
+            else:
+                # Stochastic-ED cluster: thermodynamics already computed
+                # (KPM_DOS / FTLM) and resampled onto self.temp_values.
+                quantities = self.clusters[cluster_id]['thermo']
             
             for prop in ['energy', 'specific_heat', 'entropy']:
                 property_value = quantities[prop].copy()
