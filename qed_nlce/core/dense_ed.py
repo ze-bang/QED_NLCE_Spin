@@ -122,9 +122,17 @@ def _exact_tier_feasible(op, num_sites: int, options: EDOptions,
         sector = 1 << n
     n_aut = max(1, len(find_automorphisms(op)))
     block = max(1, sector // n_aut)  # Burnside-average block estimate
-    bytes_per = 8 if detect_time_reversal(op) else 16
-    # Eigenvalues-only dense solve: matrix + ~25% workspace headroom.
-    need = block * block * bytes_per * 1.25
+    is_real = detect_time_reversal(op)
+    if op.conserves_sz():
+        # qed C++ engine: builds the block in its final dtype, in place.
+        bytes_per = (8 if is_real else 16) * 1.25
+    else:
+        # Python engine (parity-blocked): constructs the block as
+        # complex128 and, when real, holds the real copy alongside it
+        # transiently (16 + 8 bytes/elem peak); eigh itself runs
+        # overwrite_a=True so adds only O(n) workspace.
+        bytes_per = (24 if is_real else 16) * 1.1
+    need = block * block * bytes_per
     avail = _mem_available_bytes()
     limit = int(getattr(options, "exact_max_block", 120_000))
     ok = block <= limit and need <= 0.8 * avail
@@ -133,7 +141,7 @@ def _exact_tier_feasible(op, num_sites: int, options: EDOptions,
         "|Aut|=%d block~%s %s need~%.1f GB avail~%.1f GB "
         "exact_max_block=%d -> %s",
         log_tag, n, op.conserves_sz(), f"{sector:,}", n_aut, f"{block:,}",
-        "real" if bytes_per == 8 else "complex",
+        "real" if is_real else "complex",
         need / 2**30, avail / 2**30, limit,
         "EXACT" if ok else "OFTLM",
     )

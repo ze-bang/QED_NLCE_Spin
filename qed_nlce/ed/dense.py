@@ -367,12 +367,21 @@ def _realify_block(H: np.ndarray, states: np.ndarray, n: int) -> np.ndarray:
 
 def _eigh_block(block: np.ndarray) -> np.ndarray:
     """Diagonalize one Hermitian block, using real arithmetic when the
-    block is (numerically) real."""
+    block is (numerically) real.
+
+    ``overwrite_a=True`` is essential at scale: without it scipy COPIES
+    the input, doubling peak memory -- a 65k complex block is 68 GB and
+    the silent copy is the difference between fitting in RAM and an OOM
+    kill hours into a cluster solve. No caller reuses the block after
+    this. ``check_finite=False`` skips a full O(n^2) validation pass
+    over data we just constructed ourselves.
+    """
     if block.shape[0] == 1:
         return np.array([block[0, 0].real])
     if np.iscomplexobj(block) and np.max(np.abs(block.imag)) < _REAL_TOL:
         block = np.ascontiguousarray(block.real)
-    return sla.eigh(block, eigvals_only=True)
+    return sla.eigh(block, eigvals_only=True, overwrite_a=True,
+                    check_finite=False)
 
 
 def _sector_blocks(
