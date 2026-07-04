@@ -73,6 +73,16 @@ class FullEDPipeline(Pipeline):
         g.add_argument("--oftlm_krylov_dim", type=int, default=100,
                        help="OFTLM: Lanczos/Krylov dimension per random vector "
                             "(default 100).")
+        g.add_argument("--exact_max_block", type=int, default=120_000,
+                       help="Largest symmetry-block dimension the exact tier "
+                            "will dense-diagonalize (default 120000). Above "
+                            "--oftlm_cutoff a cluster is STILL solved exactly "
+                            "when its largest block (Sz sector / |Aut|, real "
+                            "arithmetic when time-reversal holds) is below "
+                            "this and fits in RAM -- e.g. 19-site XXZ "
+                            "pyrochlore order-6 trees. OFTLM is a last "
+                            "resort: NLCE weight cancellation at deep orders "
+                            "amplifies any stochastic noise.")
         g.add_argument("--oftlm_num_seeds", type=int, default=2,
                        help="OFTLM: number of independent seeds the sample "
                             "budget is split across (default 2). >= 2 yields "
@@ -117,6 +127,7 @@ class FullEDPipeline(Pipeline):
             oftlm_num_samples=getattr(args, "oftlm_num_samples", 20),
             oftlm_krylov_dim=getattr(args, "oftlm_krylov_dim", 100),
             oftlm_num_seeds=getattr(args, "oftlm_num_seeds", 2),
+            exact_max_block=getattr(args, "exact_max_block", 120_000),
             device=getattr(args, "device", "cpu"),
         )
 

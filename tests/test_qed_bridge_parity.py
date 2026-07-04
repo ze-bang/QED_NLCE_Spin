@@ -119,3 +119,12 @@ def test_pyrochlore_order4_parity(pyro_clusters):
     op, n = _build_xxz_pyrochlore_op(by_order[4][0], tetrahedra)
     assert n == 13
     _assert_parity(op)
+
+
+@pytest.mark.slow
+def test_explicit_generators_path_parity_n16():
+    """N >= 16 routes through the explicit-abelian-generators path
+    (qed's symmetry='auto' max-clique search hangs on the huge
+    automorphism groups of pyrochlore clusters). Pin its correctness
+    against the Python oracle on a 16-site ring."""
+    _assert_parity(_heisenberg_ring(16))

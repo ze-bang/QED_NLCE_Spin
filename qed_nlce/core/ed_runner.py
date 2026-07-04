@@ -53,5 +53,9 @@ class EDOptions:
     oftlm_num_samples: int = 20          # R random samples (split across seeds)
     oftlm_krylov_dim: int = 100          # Lanczos steps per sample
     oftlm_num_seeds: int = 2             # independent seeds -> std_error bands
+    # Block-aware exact-tier gate: above oftlm_cutoff a cluster still
+    # solves EXACTLY when its largest symmetry block (Sz sector / |Aut|,
+    # real when TR holds) is below this AND fits available RAM.
+    exact_max_block: int = 120_000
     device: str = "cpu"                  # qed.full_spectrum backend device
     extra_flags: list[str] = field(default_factory=list)
