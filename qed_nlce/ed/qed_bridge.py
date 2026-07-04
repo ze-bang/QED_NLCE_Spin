@@ -35,6 +35,18 @@ __all__ = ["full_spectrum_qed"]
 # masking the real error.
 _SAB_OVERFLOW_MARKER = "ED_SYM_SAB_MAX_DIM"
 
+# symmetry="auto" budget: above this group size, skip qed's
+# commutation-graph + maximum-clique abelian-subgroup search (O(|Aut|^2)
+# pair checks + NP-hard clique; hours at |Aut| ~ 3e4) and hand it greedy
+# maximal-abelian generators instead. 512 keeps the auto path's
+# non-abelian star reduction for every ordinary cluster (|Aut| <~ 10^2)
+# while capping the pathological symmetric ones.
+_AUTO_GROUP_MAX = 512
+# Probe cap for the Python automorphism search (it bails to {identity}
+# above this, which would silently re-enable the auto path -- keep it
+# far above any group an NLCE cluster realistically has).
+_AUTO_PROBE_CAP = 1 << 20
+
 
 def _looks_like_sab_overflow(exc: Exception) -> bool:
     return _SAB_OVERFLOW_MARKER in str(exc)
@@ -87,27 +99,65 @@ def full_spectrum_qed(
         )
         return evals
 
-    try:
-        res = qed.full_spectrum(
-            qop, symmetry="auto", spin_flip="auto", time_reversal="auto",
-            device=device,
-        )
-    except RuntimeError as exc:
-        if not _looks_like_sab_overflow(exc):
-            raise
-        logging.warning(
-            "[%s] non-abelian SAB engine overflowed on N=%d (%s); "
-            "falling back to an explicit abelian generator set",
-            log_tag, n, exc,
-        )
-        from .symmetry import build_symmetry_group
+    # ------------------------------------------------------------------
+    # Large-automorphism-group guard. qed's symmetry="auto" resolves its
+    # maximal abelian subgroup by building the full pairwise commutation
+    # graph over ALL |Aut| group elements and then running MAXIMUM-CLIQUE
+    # on it -- O(|Aut|^2) pure-Python pair checks followed by an NP-hard
+    # search. Fine for |Aut| ~ 10^2, catastrophic for the highly symmetric
+    # clusters where the engine should win biggest: the 16-site order-5
+    # pyrochlore cluster (multiplicity 1/2) has |Aut| ~ 3.1e4 -> 4.8e8
+    # pairs and a >5 h clique search, while the same cluster solves in
+    # ~1 s given explicit generators. Probe the group size with the
+    # tested Python automorphism search and, when it is large, hand qed a
+    # greedy maximal-abelian generator set instead of "auto". The greedy
+    # construction is maximal (not maximum); the marginally smaller
+    # subgroup costs a slightly larger dense block, which is noise next
+    # to hours of clique search.
+    # ------------------------------------------------------------------
+    from .symmetry import find_automorphisms, maximal_abelian_subgroup
 
-        group, _has_flip = build_symmetry_group(op)
-        gens = [list(p) for p in group.elements]
+    autos = find_automorphisms(op, max_group=_AUTO_PROBE_CAP)
+    if len(autos) > _AUTO_GROUP_MAX:
+        t_g = time.monotonic()
+        ab = maximal_abelian_subgroup([(p, 0) for p in autos], n)
+        # ab elements/generators are (perm, flip) composites with flip=0
+        # by construction; qed's ``symmetry=`` takes bare site
+        # permutations (spin flip is composed separately via
+        # ``spin_flip="auto"``).
+        gens = [list(g[0]) for g, _order in ab.gens]
+        logging.info(
+            "[%s] N=%d: |Aut|=%d exceeds the symmetry='auto' budget (%d); "
+            "using a greedy maximal-abelian generator set "
+            "(%d elements, %.1fs) instead of the commutation-graph "
+            "max-clique path",
+            log_tag, n, len(autos), _AUTO_GROUP_MAX,
+            len(ab.elements), time.monotonic() - t_g,
+        )
         res = qed.full_spectrum(
             qop, symmetry=gens, spin_flip="auto", time_reversal="auto",
             device=device,
         )
+    else:
+        try:
+            res = qed.full_spectrum(
+                qop, symmetry="auto", spin_flip="auto", time_reversal="auto",
+                device=device,
+            )
+        except RuntimeError as exc:
+            if not _looks_like_sab_overflow(exc):
+                raise
+            logging.warning(
+                "[%s] non-abelian SAB engine overflowed on N=%d (%s); "
+                "falling back to an explicit abelian generator set",
+                log_tag, n, exc,
+            )
+            ab = maximal_abelian_subgroup([(p, 0) for p in autos], n)
+            gens = [list(g[0]) for g, _order in ab.gens]
+            res = qed.full_spectrum(
+                qop, symmetry=gens, spin_flip="auto", time_reversal="auto",
+                device=device,
+            )
     dt = time.monotonic() - t0
 
     evals = np.asarray(sorted(res.eigenvalues), dtype=np.float64)
