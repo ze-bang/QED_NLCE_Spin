@@ -479,11 +479,21 @@ class PyrochloreNLCEFit:
         params = np.asarray(params, dtype=float)
         self._n_eval += 1
 
+        # Floating g-factor: when "g_eff" is a fit parameter, the Zeeman
+        # field of each dataset is recomputed per evaluation from its stored
+        # B (Tesla): h[K] = B * g_eff * MU_B_K. The model couplings passed to
+        # the NLCE runner exclude g_eff (it only enters through h).
+        g_idx = self.param_names.index("g_eff") if "g_eff" in self.param_names else None
+        p_model = params if g_idx is None else np.delete(params, g_idx)
+
         total = 0.0
         for ds in self.datasets:
             # Per-field evaluation (multi-field fit); h=None -> zero/single field.
+            h = ds.get("h_meV")
+            if g_idx is not None and ds.get("B_tesla") is not None:
+                h = float(ds["B_tesla"]) * float(params[g_idx]) * MU_B_K
             result = self.runner.run(
-                params, h=ds.get("h_meV"), field_dir=ds.get("field_dir"))
+                p_model, h=h, field_dir=ds.get("field_dir"))
             if result is None:
                 return 1e12
 
@@ -648,6 +658,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--model", type=str, default="qsi",
                         choices=["qsi", "xyz", "heisenberg"],
                         help="Spin model (default: qsi).")
+    parser.add_argument("--float_g", action="store_true",
+                        help="Fit the effective g-factor as an extra parameter "
+                             "(multi-field configs only; initialized at --g_eff, "
+                             "bounded by --g_min/--g_max).")
+    parser.add_argument("--g_min", type=float, default=3.0,
+                        help="Lower bound for a floating g_eff (default 3.0).")
+    parser.add_argument("--g_max", type=float, default=7.0,
+                        help="Upper bound for a floating g_eff (default 7.0).")
     parser.add_argument("--g_eff", type=float, default=G_EFF,
                         help="Effective g along local [111] for the Zeeman "
                              "conversion h[meV]=B[T]*g_eff*mu_B (default %(default)s).")
@@ -743,6 +761,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                 h_meV=h_meV,
                 field_dir=ds_cfg.get("field_dir"),
             )
+            if B is not None:
+                ds["B_tesla"] = float(B)   # kept for a floating g_eff
             datasets.append(ds)
     elif args.exp_Cv:
         ds = _load_dataset(
@@ -786,6 +806,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         param_names = param_names + ["h"]
         bounds = bounds + [(0.0, 5.0)]
         initial = np.append(initial, 0.0)
+
+    if args.float_g:
+        if not multi_field:
+            parser.error("--float_g requires a multi-field --exp_config "
+                         "(datasets with Tesla 'h' fields).")
+        # g-factor calibration: the Zeeman scale of every in-field dataset is
+        # recomputed per evaluation as h = B * g_eff * MU_B_K (see chi2).
+        param_names = param_names + ["g_eff"]
+        bounds = bounds + [(args.g_min, args.g_max)]
+        initial = np.append(initial, args.g_eff)
 
     # --- Build runner ---
     runner = PyrochloreNLCERunner(
