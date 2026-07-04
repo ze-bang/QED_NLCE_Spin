@@ -250,7 +250,14 @@ class PyrochloreNLCERunner:
         """
         if self.model == "qsi":
             # Local-frame QSI mapped to the XYZ couplings the ED code consumes.
-            Jzz, Jpm, Jpmpm = params[0], params[1], params[2]
+            # A 2-parameter vector means J±± is FIXED at exactly 0 (--fix_Jpmpm):
+            # Jxx == Jyy then conserves total S^z (the [111] Zeeman is
+            # longitudinal in the local frames), so 16-site clusters block into
+            # <=12870-dim sectors instead of a 65536-dim Sz-broken dense solve
+            # (~1.3 GB/40 s vs ~34 GB/1 h) -- the difference between a
+            # DE-viable order-5 fit and an OOM.
+            Jzz, Jpm = params[0], params[1]
+            Jpmpm = params[2] if len(params) >= 3 else 0.0
             Jxx, Jyy = -Jpm + Jpmpm, -Jpm - Jpmpm
             h = h_override if h_override is not None else 0.0
             return [f"--Jxx={Jxx:.12f}", f"--Jyy={Jyy:.12f}",
@@ -300,10 +307,13 @@ class PyrochloreNLCERunner:
         try:
             subprocess.run(cmd, check=True, capture_output=True, timeout=7200)
         except subprocess.CalledProcessError as e:
-            logging.error("NLCE run failed: %s", e.stderr.decode("utf-8", errors="replace")[:400])
+            # The workflow logs INFO to stderr, so the interesting part (the
+            # traceback / abort reason) is at the END of the stream.
+            err = e.stderr.decode("utf-8", errors="replace")
+            logging.error("NLCE run failed (rc=%s): ...%s", e.returncode, err[-1500:])
             return None
         except subprocess.TimeoutExpired:
-            logging.error("NLCE run timed out (>2 h)")
+            logging.error("NLCE run timed out (>2 h): %s", " ".join(cmd[:8]))
             return None
 
         # After the first successful run, cluster files are on disk — skip
@@ -658,6 +668,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--model", type=str, default="qsi",
                         choices=["qsi", "xyz", "heisenberg"],
                         help="Spin model (default: qsi).")
+    parser.add_argument("--fix_Jpmpm", action="store_true",
+                        help="qsi model: pin J±± at exactly 0 (2 exchange "
+                             "params). Keeps Jxx == Jyy, so total S^z stays "
+                             "conserved and 16-site clusters stay Sz-blocked "
+                             "(~40 s dense solves instead of ~1 h, 34 GB "
+                             "Sz-broken ones) -- required for order-5 DE fits.")
     parser.add_argument("--float_g", action="store_true",
                         help="Fit the effective g-factor as an extra parameter "
                              "(multi-field configs only; initialized at --g_eff, "
@@ -788,10 +804,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.model == "qsi":
         # Non-Kramers: Jz± = 0 by time reversal -> 3 exchange params
         # (Jzz, J±, J±±), mapped to the ED code's Jxx/Jyy/Jzz in _param_to_flags.
-        param_names = ["Jzz", "Jpm", "Jpmpm"]
-        bounds  = [(args.Jzz_min, args.Jzz_max), _jb("Jpm_min", "Jpm_max"),
-                   _jb("Jpmpm_min", "Jpmpm_max")]
-        initial = np.array([args.Jzz_init, args.Jpm_init, args.Jpmpm_init])
+        if args.fix_Jpmpm:
+            # J±± pinned at exactly 0 -> Jxx == Jyy -> U(1) S^z survives
+            # (also in a [111] field) and large clusters stay Sz-blocked.
+            param_names = ["Jzz", "Jpm"]
+            bounds  = [(args.Jzz_min, args.Jzz_max), _jb("Jpm_min", "Jpm_max")]
+            initial = np.array([args.Jzz_init, args.Jpm_init])
+        else:
+            param_names = ["Jzz", "Jpm", "Jpmpm"]
+            bounds  = [(args.Jzz_min, args.Jzz_max), _jb("Jpm_min", "Jpm_max"),
+                       _jb("Jpmpm_min", "Jpmpm_max")]
+            initial = np.array([args.Jzz_init, args.Jpm_init, args.Jpmpm_init])
     elif args.model == "xyz":
         param_names = ["Jxx", "Jyy", "Jzz"]
         bounds  = [(args.Jzz_min, args.Jzz_max)] * 3
