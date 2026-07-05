@@ -90,6 +90,21 @@ def test_22site_xxz_routes_oftlm(big_ram):
     assert not dense_ed._exact_tier_feasible(op, 22, EDOptions(), "t")
 
 
+def test_sector_cap_rejects_symmetric_order7(big_ram):
+    """Even a HIGH-symmetry 22-site cluster (small blocks) must be
+    rejected: the streaming lane's serial basis construction scales with
+    the raw C(22,11)=705k sector (measured 6.5 h+ vs 147 s at 92k), so
+    tiny blocks do not make the solve fast. Simulate by lifting the
+    block cap and confirming the sector cap still gates."""
+    op = _xxz_chain(22)
+    lifted = EDOptions(exact_max_block=10_000_000)
+    assert not dense_ed._exact_tier_feasible(op, 22, lifted, "t")
+    # Control: the same lifted-block config accepts an order-6-scale
+    # sector (C(19,9) = 92k < 200k), proving the rejection above came
+    # from the sector cap, not the block cap.
+    assert dense_ed._exact_tier_feasible(_xxz_chain(19), 19, lifted, "t")
+
+
 def test_ram_guard_blocks_exact(tiny_ram):
     """Same 19-site cluster must fall back to OFTLM on a small machine."""
     op = _xxz_chain(19)

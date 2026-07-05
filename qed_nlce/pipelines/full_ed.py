@@ -83,6 +83,14 @@ class FullEDPipeline(Pipeline):
                             "pyrochlore order-6 trees. OFTLM is a last "
                             "resort: NLCE weight cancellation at deep orders "
                             "amplifies any stochastic noise.")
+        g.add_argument("--exact_max_sector", type=int, default=200_000,
+                       help="Largest raw Sz(-parity) sector the exact tier "
+                            "accepts (default 200000): the per-sector basis "
+                            "construction is serial and scales with the "
+                            "sector, not the block (C(19,9)=92k -> 147 s; "
+                            "C(22,11)=705k -> hours). Raise only after "
+                            "upstream parallelizes the streaming-lane "
+                            "construction.")
         g.add_argument("--oftlm_num_seeds", type=int, default=2,
                        help="OFTLM: number of independent seeds the sample "
                             "budget is split across (default 2). >= 2 yields "
@@ -128,6 +136,7 @@ class FullEDPipeline(Pipeline):
             oftlm_krylov_dim=getattr(args, "oftlm_krylov_dim", 100),
             oftlm_num_seeds=getattr(args, "oftlm_num_seeds", 2),
             exact_max_block=getattr(args, "exact_max_block", 120_000),
+            exact_max_sector=getattr(args, "exact_max_sector", 200_000),
             device=getattr(args, "device", "cpu"),
         )
 

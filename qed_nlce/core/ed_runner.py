@@ -54,8 +54,12 @@ class EDOptions:
     oftlm_krylov_dim: int = 100          # Lanczos steps per sample
     oftlm_num_seeds: int = 2             # independent seeds -> std_error bands
     # Block-aware exact-tier gate: above oftlm_cutoff a cluster still
-    # solves EXACTLY when its largest symmetry block (Sz sector / |Aut|,
+    # solves EXACTLY when its largest symmetry block (Sz sector / |G_ab|,
     # real when TR holds) is below this AND fits available RAM.
     exact_max_block: int = 120_000
+    # ... AND its largest raw Sz(-parity) sector is below this: the
+    # streaming lane's serial basis construction scales with the sector,
+    # not the block (measured 6.5 h+ at C(22,11)=705k vs 147 s at 92k).
+    exact_max_sector: int = 200_000
     device: str = "cpu"                  # qed.full_spectrum backend device
     extra_flags: list[str] = field(default_factory=list)

@@ -136,7 +136,14 @@ def _exact_tier_feasible(op, num_sites: int, options: EDOptions,
     need = block * block * bytes_per
     avail = _mem_available_bytes()
     limit = int(getattr(options, "exact_max_block", 120_000))
-    ok = block <= limit and need <= 0.8 * avail
+    # Second axis: the streaming lane's per-sector basis construction is
+    # SERIAL and scales with the raw sector size regardless of how small
+    # the momentum blocks end up. Measured: C(19,9)=92k sectors -> 147 s
+    # total; C(22,11)=705k -> the construction alone ran 6.5 h+ before
+    # being abandoned. Cap the sector so exact solves stay in the
+    # minutes-per-cluster regime until upstream parallelizes it.
+    sector_limit = int(getattr(options, "exact_max_sector", 200_000))
+    ok = block <= limit and sector <= sector_limit and need <= 0.8 * avail
     logging.info(
         "[%s] exact-tier feasibility: N=%d sz_conserved=%s sector=%s "
         "|G_abelian|=%d block~%s %s need~%.1f GB avail~%.1f GB "
