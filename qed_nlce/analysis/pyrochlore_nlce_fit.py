@@ -422,11 +422,18 @@ class PyrochloreNLCERunner:
 # ---------------------------------------------------------------------------
 
 def _interp_safe(T_calc, y_calc, T_exp):
-    """Cubic interpolation from calc grid onto experimental T points."""
+    """Linear interpolation from calc grid onto experimental T points.
+
+    Linear, not cubic: gapped in-field C(T) is ~0 below the Zeeman gap and
+    then rises steeply; a cubic spline RINGS negative between grid points
+    on that shape (undershoot ~0.1 J/mol/K), which both distorts chi2 and
+    false-triggers the negative-C divergence rejector. The model grid is a
+    dense 40-point log grid -- linear error is negligible against it.
+    """
     if T_calc is None or len(T_calc) < 2:
         return np.full_like(T_exp, np.nan)
     sort = np.argsort(T_calc)
-    fn = interp1d(T_calc[sort], y_calc[sort], kind="cubic",
+    fn = interp1d(T_calc[sort], y_calc[sort], kind="linear",
                   bounds_error=False, fill_value=np.nan)
     return fn(T_exp)
 
@@ -518,7 +525,21 @@ class PyrochloreNLCEFit:
                 y_exp = np.asarray(ds[obs_key])
                 y_calc = _interp_safe(result["T"], result[obs_key], T_exp)
                 sigma = np.asarray(ds[obs_key + "_err"]) if obs_key + "_err" in ds else None
+                # NLCE divergence rejector: below the series' convergence
+                # radius (T <~ J) the bare/euler partial sums oscillate to
+                # +-O(10) J/mol/K, including NEGATIVE specific heat -- a
+                # cancellation-artifact "fit" of such curves scores better
+                # than physical ones and poisons the DE. A clearly negative
+                # C anywhere in the fit window marks the parameter point as
+                # non-converged: reject it outright.
+                if obs_key == "Cv":
+                    in_win = (T_exp >= T_min) & (T_exp <= T_max) & np.isfinite(y_calc)
+                    if np.any(y_calc[in_win] < -0.05):
+                        total = 1e10
+                        break
                 total += w * _chi2_dataset(y_calc, y_exp, T_exp, T_min, T_max, sigma)
+            if total >= 1e10:
+                break
 
         if total < self._best_chi2:
             self._best_chi2 = total
@@ -708,15 +729,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--base_dir",  type=str, default="nlce_fit_work")
     parser.add_argument("--output_dir", type=str, default="fit_results_pyrochlore")
     parser.add_argument("--skip_cluster_gen", action="store_true")
-    parser.add_argument("--resummation", type=str, default="euler",
+    parser.add_argument("--resummation", type=str, default="auto",
                         choices=["auto", "direct", "none", "euler", "wynn",
                                  "shanks", "aitken", "pade", "theta",
                                  "robust", "wynn_multi", "brezinski"],
                         help="NLCE series-acceleration method forwarded to the "
-                             "summation kernel. Default 'euler': a fixed linear "
-                             "tail transform that cannot produce the divide-by-"
-                             "near-zero spikes that Wynn/robust throw once the "
-                             "bare series diverges (order>=5 for PZO at ~1 K).")
+                             "summation kernel. Default 'auto' (-> Wynn): on the "
+                             "T <~ J alternating tail of an all-exact order-5 "
+                             "series, euler diverges to +-20 J/mol/K (negative C "
+                             "in-window) while Wynn stays bounded and positive. "
+                             "euler's spike-immunity only mattered for "
+                             "stochastic-noise-corrupted (OFTLM) weights; the "
+                             "chi2 divergence rejector guards residual Wynn "
+                             "spikes anyway.")
     parser.add_argument("--workers",   type=int, default=1,
                         help="Parallel workers for differential evolution.")
     parser.add_argument("--num_cores", type=int, default=4,
