@@ -136,12 +136,22 @@ def _exact_tier_feasible(op, num_sites: int, options: EDOptions,
     need = block * block * bytes_per
     avail = _mem_available_bytes()
     limit = int(getattr(options, "exact_max_block", 120_000))
-    # Second axis: the streaming lane's per-sector basis construction is
-    # SERIAL and scales with the raw sector size regardless of how small
-    # the momentum blocks end up. Measured: C(19,9)=92k sectors -> 147 s
-    # total; C(22,11)=705k -> the construction alone ran 6.5 h+ before
-    # being abandoned. Cap the sector so exact solves stay in the
-    # minutes-per-cluster regime until upstream parallelizes it.
+    # Second axis, the real order-7 wall (traced 2026-07-05). full_spectrum
+    # needs a DENSE H_Gamma per (Sz, irrep) block. qed has a fast
+    # O(|G|*nnz) parallel assembler, but it is gated on the orbit-CSR
+    # being materialized (subspace_operator.h try_build_dense_columns:
+    # `if (!csr_available()) return false`). Sectors whose orbit-CSR would
+    # exceed qed's 64 MiB lazy budget (make_operator.h:
+    # C(N,n_up)*n_sectors*40 B) go rep-only -> csr_available()=false ->
+    # the assembler declines -> fallback is the SEQUENTIAL column build
+    # (lanczos.cpp: `for j: col_j = H*e_j`, outer loop serial). With many
+    # small blocks at large |G| the per-column matvec payload is tiny, so
+    # OpenMP fork/join dominates and it runs ~1 core for hours.
+    # Measured: C(19,9)=92k stays under the budget (CSR path, 147 s);
+    # C(22,11)=705k*216 ~ 6 GB CSR -> rep-only -> 6.5 h+ abandoned.
+    # Upstream fix = a rep-walk dense assembler (write dense elements from
+    # rep_symmetry_row_for_each without materializing the CSR); until then
+    # cap the sector so exact solves stay minutes-per-cluster.
     sector_limit = int(getattr(options, "exact_max_sector", 200_000))
     ok = block <= limit and sector <= sector_limit and need <= 0.8 * avail
     logging.info(
