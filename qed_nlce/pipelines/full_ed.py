@@ -85,14 +85,14 @@ class FullEDPipeline(Pipeline):
                             "amplifies any stochastic noise.")
         g.add_argument("--exact_max_sector", type=int, default=200_000,
                        help="Largest raw Sz(-parity) sector the exact tier "
-                            "accepts (default 200000). Above qed's 64 MiB "
-                            "orbit-CSR budget a sector goes rep-only, which "
-                            "makes full_spectrum's dense-block assembly fall "
-                            "back to a SERIAL column-by-column matvec build "
-                            "(C(19,9)=92k -> 147 s via the fast CSR "
-                            "assembler; C(22,11)=705k -> hours via the "
-                            "fallback). Raise only after upstream adds a "
-                            "rep-walk dense assembler.")
+                            "accepts (default 200000, admits order 6). The "
+                            "upstream rep-walk dense assembler (QED 6699a42) "
+                            "removed the old serial-column-build cliff, so "
+                            "order-7 (C(22,11)=705432) is expected to solve "
+                            "exactly -- but that was not timed to completion "
+                            "on this desktop. To open order 7: verify a "
+                            "cluster run (scripts/verify_order7_exact.py) "
+                            "then pass --exact_max_sector 800000.")
         g.add_argument("--oftlm_num_seeds", type=int, default=2,
                        help="OFTLM: number of independent seeds the sample "
                             "budget is split across (default 2). >= 2 yields "

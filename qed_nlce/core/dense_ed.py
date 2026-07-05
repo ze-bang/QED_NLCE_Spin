@@ -136,22 +136,29 @@ def _exact_tier_feasible(op, num_sites: int, options: EDOptions,
     need = block * block * bytes_per
     avail = _mem_available_bytes()
     limit = int(getattr(options, "exact_max_block", 120_000))
-    # Second axis, the real order-7 wall (traced 2026-07-05). full_spectrum
-    # needs a DENSE H_Gamma per (Sz, irrep) block. qed has a fast
-    # O(|G|*nnz) parallel assembler, but it is gated on the orbit-CSR
-    # being materialized (subspace_operator.h try_build_dense_columns:
-    # `if (!csr_available()) return false`). Sectors whose orbit-CSR would
-    # exceed qed's 64 MiB lazy budget (make_operator.h:
-    # C(N,n_up)*n_sectors*40 B) go rep-only -> csr_available()=false ->
-    # the assembler declines -> fallback is the SEQUENTIAL column build
-    # (lanczos.cpp: `for j: col_j = H*e_j`, outer loop serial). With many
-    # small blocks at large |G| the per-column matvec payload is tiny, so
-    # OpenMP fork/join dominates and it runs ~1 core for hours.
-    # Measured: C(19,9)=92k stays under the budget (CSR path, 147 s);
-    # C(22,11)=705k*216 ~ 6 GB CSR -> rep-only -> 6.5 h+ abandoned.
-    # Upstream fix = a rep-walk dense assembler (write dense elements from
-    # rep_symmetry_row_for_each without materializing the CSR); until then
-    # cap the sector so exact solves stay minutes-per-cluster.
+    # Second axis: the order-7 dense-assembly wall (traced 2026-07-05).
+    # full_spectrum builds a DENSE H_Gamma per (Sz, irrep) block. The
+    # historical cliff: sectors whose orbit-CSR exceeded qed's 64 MiB lazy
+    # budget went rep-only and fell back to a SERIAL column-by-column
+    # build (lanczos.cpp `for j: col_j = H*e_j`), which at large |G|
+    # collapsed to ~1 core for hours (C(22,11)=705k ran 6.5 h+).
+    #
+    # >>> OPEN SEAM (close on the cluster). Upstream QED commit 6699a42
+    #     ("Retire the full_spectrum dense-block cliff") added the rep-walk
+    #     dense assembler: rep-lazy sectors now assemble via
+    #     build_reduced_symmetry_csr_rep in ONE O(|G|*nnz) PARALLEL pass,
+    #     no orbit-CSR materialization. Local trace of the order-7 probe
+    #     confirms the cliff is GONE -- assembly now streams through
+    #     thousands of tiny blocks (dim <= ~3265, KB each) with no serial
+    #     column crawl and flat memory. But a full order-7 solve is many
+    #     hours of small-block churn on a loaded desktop, so it was NOT
+    #     timed to completion here. The cap stays at 200k (order-7 ->
+    #     OFTLM) CONSERVATIVELY until a cluster run confirms the wall time.
+    #     To close: run scripts/verify_order7_exact.py on the cluster; if a
+    #     single order-7 cluster completes in an acceptable wall time,
+    #     raise --exact_max_sector past C(22,11)=705432 (e.g. 800000) so
+    #     the router admits order-7 to the exact tier. Leave order-8
+    #     (C(25,12)=5.2M) excluded pending its own measurement.
     sector_limit = int(getattr(options, "exact_max_sector", 200_000))
     ok = block <= limit and sector <= sector_limit and need <= 0.8 * avail
     logging.info(
