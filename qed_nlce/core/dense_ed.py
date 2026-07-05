@@ -45,7 +45,7 @@ try:  # h5py is the on-disk contract with the summation kernels
 except ImportError:  # pragma: no cover
     _HAS_H5PY = False
 
-from ..ed import solve_spectrum, thermodynamics, oftlm_thermodynamics
+from ..ed import thermodynamics, oftlm_thermodynamics
 from ..ed.qed_bridge import full_spectrum_qed
 from ..ed.io import read_operator
 from .ed_runner import EDOptions
@@ -108,7 +108,7 @@ def _exact_tier_feasible(op, num_sites: int, options: EDOptions,
     """
     from math import comb
 
-    from ..ed.symmetry import detect_time_reversal, find_automorphisms
+    from ..ed.symmetry import (build_symmetry_group, detect_time_reversal)
 
     n = int(num_sites)
     if op.conserves_sz():
@@ -116,31 +116,32 @@ def _exact_tier_feasible(op, num_sites: int, options: EDOptions,
     elif op.conserves_sz_parity():
         # Sz broken but every term shifts Sz by an even amount (e.g.
         # S+S+ pair terms with Jzpm = 0): up-spin parity halves the
-        # space, and the Python solver exploits it (see routing below).
+        # space; qed blocks by it natively since the 2026-07-04 drop.
         sector = (1 << n) // 2
     else:
         sector = 1 << n
-    n_aut = max(1, len(find_automorphisms(op)))
-    block = max(1, sector // n_aut)  # Burnside-average block estimate
+    # The reduction qed's default full-spectrum lane actually applies is
+    # the maximal ABELIAN subgroup (momentum blocks), not the full
+    # automorphism group -- pyrochlore tree clusters have |Aut| ~ 10^3
+    # but abelian cliques ~ 10^2, an ~8x difference that matters exactly
+    # at the order-7/8 feasibility edge. Use the same greedy construction
+    # the bridge hands to qed.
+    group, _ = build_symmetry_group(op, use_spin_flip=False)
+    n_ab = max(1, group.size)
+    block = max(1, sector // n_ab)  # Burnside-average block estimate
     is_real = detect_time_reversal(op)
-    if op.conserves_sz():
-        # qed C++ engine: builds the block in its final dtype, in place.
-        bytes_per = (8 if is_real else 16) * 1.25
-    else:
-        # Python engine (parity-blocked): constructs the block as
-        # complex128 and, when real, holds the real copy alongside it
-        # transiently (16 + 8 bytes/elem peak); eigh itself runs
-        # overwrite_a=True so adds only O(n) workspace.
-        bytes_per = (24 if is_real else 16) * 1.1
+    # qed C++ engine everywhere (it now blocks by Sz-parity natively for
+    # U(1)-broken models): builds each block in its final dtype, in place.
+    bytes_per = (8 if is_real else 16) * 1.25
     need = block * block * bytes_per
     avail = _mem_available_bytes()
     limit = int(getattr(options, "exact_max_block", 120_000))
     ok = block <= limit and need <= 0.8 * avail
     logging.info(
         "[%s] exact-tier feasibility: N=%d sz_conserved=%s sector=%s "
-        "|Aut|=%d block~%s %s need~%.1f GB avail~%.1f GB "
+        "|G_abelian|=%d block~%s %s need~%.1f GB avail~%.1f GB "
         "exact_max_block=%d -> %s",
-        log_tag, n, op.conserves_sz(), f"{sector:,}", n_aut, f"{block:,}",
+        log_tag, n, op.conserves_sz(), f"{sector:,}", n_ab, f"{block:,}",
         "real" if is_real else "complex",
         need / 2**30, avail / 2**30, limit,
         "EXACT" if ok else "OFTLM",
@@ -302,30 +303,17 @@ def run_ed_in_process(
         # a last resort.
         if hilbert_dim <= cutoff or _exact_tier_feasible(
                 op, int(num_sites), options, log_tag):
-            # Exact tier. Engine choice:
-            #  * Sz-conserving (or small): qed.full_spectrum -- strongest
-            #    engine (non-abelian SAB, GPU, scalable rep walk).
-            #  * LARGE Sz-broken: the Python solver -- it blocks by
-            #    Sz-PARITY (+ spatial + spin-flip + TR reality), which
-            #    qed's auto path does not exploit; parity is what makes
-            #    e.g. 17-site anisotropic (Jzpm=0) clusters dense-feasible.
-            if op.conserves_sz() or hilbert_dim <= (1 << 15):
-                evals = full_spectrum_qed(
-                    op, device=getattr(options, "device", "cpu"),
-                    log_tag=log_tag,
-                )
-            else:
-                import time as _time
-                _t0 = _time.monotonic()
-                evals = np.asarray(
-                    np.sort(solve_spectrum(op, use_symmetry=True)),
-                    dtype=np.float64)
-                logging.info(
-                    "[%s] N=%d exact spectrum via Python parity-blocked "
-                    "solver (Sz-broken): %d eigenvalues, %.1fs",
-                    log_tag, int(num_sites), evals.shape[0],
-                    _time.monotonic() - _t0,
-                )
+            # Exact tier: qed.full_spectrum for everything. Since the
+            # 2026-07-04 upstream drop, qed natively blocks by Sz-PARITY
+            # for U(1)-broken models (parity-half sectors on the rep
+            # lanes, CPU+GPU) in addition to U(1)-Sz, spatial (abelian +
+            # non-abelian little-group), spin-flip, and time-reversal --
+            # the Python parity engine is retired from the runtime path
+            # (it remains the test oracle).
+            evals = full_spectrum_qed(
+                op, device=getattr(options, "device", "cpu"),
+                log_tag=log_tag,
+            )
             _write_results(out_subdir, evals, int(num_sites), options)
         else:
             # Large cluster: matrix-free OFTLM (QED). No eigenvalues -- write the
