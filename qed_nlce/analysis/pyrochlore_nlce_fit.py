@@ -525,16 +525,22 @@ class PyrochloreNLCEFit:
                 y_exp = np.asarray(ds[obs_key])
                 y_calc = _interp_safe(result["T"], result[obs_key], T_exp)
                 sigma = np.asarray(ds[obs_key + "_err"]) if obs_key + "_err" in ds else None
-                # NLCE divergence rejector: below the series' convergence
-                # radius (T <~ J) the bare/euler partial sums oscillate to
-                # +-O(10) J/mol/K, including NEGATIVE specific heat -- a
-                # cancellation-artifact "fit" of such curves scores better
-                # than physical ones and poisons the DE. A clearly negative
-                # C anywhere in the fit window marks the parameter point as
-                # non-converged: reject it outright.
+                # NLCE divergence rejector (two-sided physical bound on Cv).
+                # Below the series' convergence radius (T <~ J, or large field)
+                # the bare partial sums cancel catastrophically and the model
+                # C(T) diverges to O(10)-O(1000) J/mol/K, EITHER sign -- and a
+                # cancellation-artifact "fit" of such curves scores better than
+                # a physical one, poisoning the DE (this is exactly what railed
+                # the order-5 campaigns toward unphysical large Jzz). The true
+                # magnetic C of a doublet is bounded: the two-level Schottky
+                # peak is ~3.6 J/(mol-Pr K), and exchange only broadens/lowers
+                # it. So any in-window C outside [-0.05, CV_CEILING] marks the
+                # point as non-converged and it is rejected outright. CV_CEILING
+                # = 8 sits far above every physical feature (<~4) and far below
+                # the divergence onset (>~20), so no converged point is lost.
                 if obs_key == "Cv":
                     in_win = (T_exp >= T_min) & (T_exp <= T_max) & np.isfinite(y_calc)
-                    if np.any(y_calc[in_win] < -0.05):
+                    if np.any(y_calc[in_win] < -0.05) or np.any(y_calc[in_win] > CV_CEILING):
                         total = 1e10
                         break
                 total += w * _chi2_dataset(y_calc, y_exp, T_exp, T_min, T_max, sigma)
@@ -647,6 +653,9 @@ class PyrochloreNLCEFit:
 # (mu_B/k_B = 0.05788 meV/T / 0.08617 meV/K = 0.6717 K/T).
 MU_B_K = 0.05788 / 0.08617    # = 0.6717 K/T  (mu_B in Kelvin per Tesla)
 G_EFF  = 5.4                  # effective g along local [111] (Kimura 2013 / Sibille 2018)
+# In-window magnetic-Cv ceiling (J/mol-Pr/K) for the NLCE divergence rejector.
+# Physical doublet features are <~4; NLCE non-convergence diverges to >~20.
+CV_CEILING = 8.0
 
 
 def _load_dataset(path: str, *, T_min=None, T_max=None, weight=1.0,
@@ -729,19 +738,26 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--base_dir",  type=str, default="nlce_fit_work")
     parser.add_argument("--output_dir", type=str, default="fit_results_pyrochlore")
     parser.add_argument("--skip_cluster_gen", action="store_true")
-    parser.add_argument("--resummation", type=str, default="auto",
+    parser.add_argument("--resummation", type=str, default="none",
                         choices=["auto", "direct", "none", "euler", "wynn",
                                  "shanks", "aitken", "pade", "theta",
                                  "robust", "wynn_multi", "brezinski"],
                         help="NLCE series-acceleration method forwarded to the "
-                             "summation kernel. Default 'auto' (-> Wynn): on the "
-                             "T <~ J alternating tail of an all-exact order-5 "
-                             "series, euler diverges to +-20 J/mol/K (negative C "
-                             "in-window) while Wynn stays bounded and positive. "
-                             "euler's spike-immunity only mattered for "
-                             "stochastic-noise-corrupted (OFTLM) weights; the "
-                             "chi2 divergence rejector guards residual Wynn "
-                             "spikes anyway.")
+                             "summation kernel. Default 'none' (BARE partial "
+                             "sum). With all-exact clusters (order<=6 under "
+                             "--fix_Jpmpm, no OFTLM), the bare series is already "
+                             "converged in the physical regime -- verified at "
+                             "order 6, moderate Jzz: S4=1.713, S5=1.714, "
+                             "S6=1.747 -- so bare IS the truth and needs no "
+                             "acceleration. Crucially it is DETERMINISTIC: "
+                             "'auto' picks a method per-property from "
+                             "convergence heuristics and, near the divergence "
+                             "radius, the fit worker and a rerun can pick "
+                             "DIFFERENT methods (2 vs 22 vs 850 J/mol/K), making "
+                             "chi2 a lottery that railed the order-5 campaigns. "
+                             "Where bare diverges (large Jzz / large field, "
+                             "below the convergence radius) the two-sided "
+                             "CV_CEILING rejector marks the point non-converged.")
     parser.add_argument("--workers",   type=int, default=1,
                         help="Parallel workers for differential evolution.")
     parser.add_argument("--num_cores", type=int, default=4,
