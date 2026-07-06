@@ -567,6 +567,7 @@ class PyrochloreNLCEFit:
         tol: float = 1e-6,
         maxiter: int = 2000,
         seed: int = 42,
+        popsize: int = 15,
         initial_params: Optional[np.ndarray] = None,
     ) -> dict:
         """Run the optimizer and return a result dict.
@@ -594,7 +595,8 @@ class PyrochloreNLCEFit:
                 tol=tol,
                 seed=seed,
                 workers=workers,
-                polish=True,
+                popsize=popsize,
+                polish=False,
                 disp=False,
             )
             best_params = res.x
@@ -781,6 +783,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                         choices=["differential_evolution", "multi_start_nelder_mead"])
     parser.add_argument("--n_starts",  type=int, default=15)
     parser.add_argument("--maxiter",   type=int, default=2000)
+    parser.add_argument("--popsize",   type=int, default=15,
+                        help="DE population multiplier (population = popsize * "
+                             "n_params). Lower it (e.g. 6) for expensive "
+                             "order-6 evaluations.")
     parser.add_argument("--tol",       type=float, default=1e-6)
     parser.add_argument("--seed",      type=int, default=42)
 
@@ -911,6 +917,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         tol=args.tol,
         maxiter=args.maxiter,
         seed=args.seed,
+        popsize=args.popsize,
         initial_params=initial,
     )
 
