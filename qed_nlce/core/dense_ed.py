@@ -143,23 +143,21 @@ def _exact_tier_feasible(op, num_sites: int, options: EDOptions,
     # build (lanczos.cpp `for j: col_j = H*e_j`), which at large |G|
     # collapsed to ~1 core for hours (C(22,11)=705k ran 6.5 h+).
     #
-    # >>> OPEN SEAM (close on the cluster). Upstream QED commit 6699a42
-    #     ("Retire the full_spectrum dense-block cliff") added the rep-walk
-    #     dense assembler: rep-lazy sectors now assemble via
+    # >>> SEAM CLOSED (2026-07-06). Upstream QED commit 6699a42 ("Retire
+    #     the full_spectrum dense-block cliff") added the rep-walk dense
+    #     assembler: rep-lazy sectors assemble via
     #     build_reduced_symmetry_csr_rep in ONE O(|G|*nnz) PARALLEL pass,
-    #     no orbit-CSR materialization. Local trace of the order-7 probe
-    #     confirms the cliff is GONE -- assembly now streams through
-    #     thousands of tiny blocks (dim <= ~3265, KB each) with no serial
-    #     column crawl and flat memory. But a full order-7 solve is many
-    #     hours of small-block churn on a loaded desktop, so it was NOT
-    #     timed to completion here. The cap stays at 200k (order-7 ->
-    #     OFTLM) CONSERVATIVELY until a cluster run confirms the wall time.
-    #     To close: run scripts/verify_order7_exact.py on the cluster; if a
-    #     single order-7 cluster completes in an acceptable wall time,
-    #     raise --exact_max_sector past C(22,11)=705432 (e.g. 800000) so
-    #     the router admits order-7 to the exact tier. Leave order-8
-    #     (C(25,12)=5.2M) excluded pending its own measurement.
-    sector_limit = int(getattr(options, "exact_max_sector", 200_000))
+    #     no orbit-CSR materialization, streaming through thousands of tiny
+    #     blocks with flat memory and no serial column crawl.
+    #     scripts/verify_order7_exact.py timed a 22-site order-7 pyrochlore
+    #     cluster (raw Sz sector C(22,11)=705432) end to end on a cluster
+    #     node: the COMPLETE 2^22 = 4,194,304 eigenvalue spectrum in 3.65 h
+    #     (E0=-7.487, count exact). The exact tier is confirmed feasible
+    #     through order 7, so the cap is raised 200k -> 800k (default in
+    #     EDOptions.exact_max_sector / --exact_max_sector), admitting
+    #     order-7 clusters to exact ED instead of OFTLM. Order 8
+    #     (C(25,12)=5.2M) stays excluded pending its own timing.
+    sector_limit = int(getattr(options, "exact_max_sector", 800_000))
     ok = block <= limit and sector <= sector_limit and need <= 0.8 * avail
     logging.info(
         "[%s] exact-tier feasibility: N=%d sz_conserved=%s sector=%s "

@@ -83,16 +83,17 @@ class FullEDPipeline(Pipeline):
                             "pyrochlore order-6 trees. OFTLM is a last "
                             "resort: NLCE weight cancellation at deep orders "
                             "amplifies any stochastic noise.")
-        g.add_argument("--exact_max_sector", type=int, default=200_000,
+        g.add_argument("--exact_max_sector", type=int, default=800_000,
                        help="Largest raw Sz(-parity) sector the exact tier "
-                            "accepts (default 200000, admits order 6). The "
+                            "accepts (default 800000, admits order 7). The "
                             "upstream rep-walk dense assembler (QED 6699a42) "
-                            "removed the old serial-column-build cliff, so "
-                            "order-7 (C(22,11)=705432) is expected to solve "
-                            "exactly -- but that was not timed to completion "
-                            "on this desktop. To open order 7: verify a "
-                            "cluster run (scripts/verify_order7_exact.py) "
-                            "then pass --exact_max_sector 800000.")
+                            "removed the old serial-column-build cliff: a "
+                            "22-site order-7 cluster (C(22,11)=705432) was "
+                            "verified to solve exactly in 3.65 h on a cluster "
+                            "node (scripts/verify_order7_exact.py, 2026-07-06; "
+                            "4,194,304 = 2^22 eigenvalues, E0=-7.487). Order 8 "
+                            "(C(25,12)=5.2M) stays excluded pending its own "
+                            "timing.")
         g.add_argument("--oftlm_num_seeds", type=int, default=2,
                        help="OFTLM: number of independent seeds the sample "
                             "budget is split across (default 2). >= 2 yields "
@@ -138,7 +139,7 @@ class FullEDPipeline(Pipeline):
             oftlm_krylov_dim=getattr(args, "oftlm_krylov_dim", 100),
             oftlm_num_seeds=getattr(args, "oftlm_num_seeds", 2),
             exact_max_block=getattr(args, "exact_max_block", 120_000),
-            exact_max_sector=getattr(args, "exact_max_sector", 200_000),
+            exact_max_sector=getattr(args, "exact_max_sector", 800_000),
             device=getattr(args, "device", "cpu"),
         )
 

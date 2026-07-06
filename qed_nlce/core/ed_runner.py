@@ -57,9 +57,12 @@ class EDOptions:
     # solves EXACTLY when its largest symmetry block (Sz sector / |G_ab|,
     # real when TR holds) is below this AND fits available RAM.
     exact_max_block: int = 120_000
-    # ... AND its largest raw Sz(-parity) sector is below this: the
-    # streaming lane's serial basis construction scales with the sector,
-    # not the block (measured 6.5 h+ at C(22,11)=705k vs 147 s at 92k).
-    exact_max_sector: int = 200_000
+    # ... AND its largest raw Sz(-parity) sector is below this. The old
+    # serial column-crawl scaled with the sector (6.5 h+ at C(22,11)=705k
+    # vs 147 s at 92k); the QED rep-walk assembler (6699a42) retired that
+    # cliff, and a 22-site order-7 cluster (sector 705432) now solves
+    # exactly in 3.65 h (verify_order7_exact.py, 2026-07-06). Cap raised
+    # 200k -> 800k to admit order 7; order 8 (C(25,12)=5.2M) still excluded.
+    exact_max_sector: int = 800_000
     device: str = "cpu"                  # qed.full_spectrum backend device
     extra_flags: list[str] = field(default_factory=list)

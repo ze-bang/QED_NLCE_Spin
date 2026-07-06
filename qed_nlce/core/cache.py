@@ -388,7 +388,7 @@ class EigenvalueCache:
             oftlm_krylov_dim=int(getattr(options, "oftlm_krylov_dim", 100)),
             oftlm_num_seeds=int(getattr(options, "oftlm_num_seeds", 2)),
             exact_max_block=int(getattr(options, "exact_max_block", 120_000)),
-            exact_max_sector=int(getattr(options, "exact_max_sector", 200_000)),
+            exact_max_sector=int(getattr(options, "exact_max_sector", 800_000)),
             device=str(getattr(options, "device", "cpu")),
             cluster_graph_hash=graph_hash,
             hamiltonian_content_hash=ham_hash,
