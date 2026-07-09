@@ -696,8 +696,9 @@ class NLCEWorkflow:
                     f.write("\n===== STDERR =====\n")
                     f.write(proc.stderr)
             n_warn = 0
-            for line in proc.stdout.splitlines():
-                if "WARNING" in line:
+            for line in proc.stdout.splitlines() + proc.stderr.splitlines():
+                upper = line.upper()
+                if "WARNING" in upper or "SKIPPED" in upper:
                     logging.warning("summation: %s", line.strip())
                     n_warn += 1
             logging.info(
