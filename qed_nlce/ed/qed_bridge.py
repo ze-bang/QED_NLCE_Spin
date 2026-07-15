@@ -27,14 +27,6 @@ from .oftlm import spinhalf_to_qed
 
 __all__ = ["full_spectrum_qed"]
 
-# Exact marker from QED's build_sab_partition0 throw
-# (QED/src/symmetry/symmetry_adapted.cpp): the cap message names its own
-# env var. Deliberately NOT a fuzzy match -- substrings like "sab"/"cap"
-# would match unrelated RuntimeErrors ("disabled", "capacity", ...) and
-# silently reroute a genuine failure through the slower fallback,
-# masking the real error.
-_SAB_OVERFLOW_MARKER = "ED_SYM_SAB_MAX_DIM"
-
 # symmetry="auto" budget: above this group size, skip qed's
 # commutation-graph + maximum-clique abelian-subgroup search (O(|Aut|^2)
 # pair checks + NP-hard clique; hours at |Aut| ~ 3e4) and hand it greedy
@@ -48,10 +40,6 @@ _AUTO_GROUP_MAX = 512
 _AUTO_PROBE_CAP = 1 << 20
 
 
-def _looks_like_sab_overflow(exc: Exception) -> bool:
-    return _SAB_OVERFLOW_MARKER in str(exc)
-
-
 def full_spectrum_qed(
     op: SpinHalfOperator,
     *,
@@ -60,12 +48,12 @@ def full_spectrum_qed(
 ) -> np.ndarray:
     """Complete sorted eigenvalue spectrum of ``op`` via ``qed.full_spectrum``.
 
-    Auto-detects symmetry (spatial, U(1), spin-flip, time-reversal). If
-    the non-abelian symmetry-adapted-basis engine overflows its
-    in-memory enumeration cap (large Sz-broken clusters), falls back to
-    an *explicit* abelian generator set -- computed by the existing,
-    tested Python automorphism search -- so ``qed`` still gets the fast
-    matrix-free rep-walk path instead of no spatial reduction at all.
+    Auto-detects symmetry (spatial, U(1), spin-flip, time-reversal),
+    routed through QED's factorized little-group engine. For large
+    automorphism groups the commutation-graph + max-clique cost of
+    ``symmetry="auto"`` is skipped in favour of an *explicit* abelian
+    generator set from the tested Python automorphism search, so ``qed``
+    still gets the fast matrix-free rep-walk path.
     """
     import qed
 
@@ -139,25 +127,14 @@ def full_spectrum_qed(
             device=device,
         )
     else:
-        try:
-            res = qed.full_spectrum(
-                qop, symmetry="auto", spin_flip="auto", time_reversal="auto",
-                device=device,
-            )
-        except RuntimeError as exc:
-            if not _looks_like_sab_overflow(exc):
-                raise
-            logging.warning(
-                "[%s] non-abelian SAB engine overflowed on N=%d (%s); "
-                "falling back to an explicit abelian generator set",
-                log_tag, n, exc,
-            )
-            ab = maximal_abelian_subgroup([(p, 0) for p in autos], n)
-            gens = [list(g[0]) for g, _order in ab.gens]
-            res = qed.full_spectrum(
-                qop, symmetry=gens, spin_flip="auto", time_reversal="auto",
-                device=device,
-            )
+        # Small automorphism group: the little-group engine handles the full
+        # "auto" reduction directly. (The former SAB-overflow fallback was
+        # removed with QED's monolithic symmetry-adapted engine -- the
+        # little-group engine supersedes it and does not overflow here.)
+        res = qed.full_spectrum(
+            qop, symmetry="auto", spin_flip="auto", time_reversal="auto",
+            device=device,
+        )
     dt = time.monotonic() - t0
 
     evals = np.asarray(sorted(res.eigenvalues), dtype=np.float64)
