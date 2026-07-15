@@ -32,8 +32,11 @@ def test_registries_are_populated_on_import():
     pipes = list_pipelines()
 
     assert "pyrochlore" in geoms
-    assert "triangular_site" in geoms
     assert "triangular_triangle" in geoms
+    # Triangle-based is the ONLY triangular NLCE path; the site-based
+    # expansion is retired from the runtime (kept as a correctness oracle),
+    # so it must NOT be selectable.
+    assert "triangular_site" not in geoms
 
     # Dense-only: full_ed is the sole pipeline.
     assert pipes == ["full_ed"]
@@ -48,7 +51,7 @@ def test_get_geometry_and_get_pipeline_return_instances():
         get_pipeline,
     )
 
-    for name in ("pyrochlore", "triangular_site", "triangular_triangle"):
+    for name in ("pyrochlore", "triangular_triangle"):
         g = get_geometry(name)
         assert isinstance(g, Geometry)
         assert g.name == name

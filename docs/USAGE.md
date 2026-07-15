@@ -14,7 +14,7 @@ eigenvalue spectrum is noise-free, so per-cluster thermodynamics enter
 the NLCE sum exactly.
 
 ```bash
-qed-nlce --geometry triangular_site --pipeline full_ed --max_order 8 \
+qed-nlce --geometry triangular_triangle --pipeline full_ed --max_order 8 \
          --J1 1.0 --thermo --temp_min 0.1 --temp_max 10 --temp_bins 100 \
          --base_dir output/tri_full_o8
 ```
@@ -26,8 +26,13 @@ qed-nlce --geometry triangular_site --pipeline full_ed --max_order 8 \
 | Geometry | Key flags |
 | --- | --- |
 | `pyrochlore` | `--Jxx --Jyy --Jzz --h --field_dir` |
-| `triangular_site` | `--J1 --J2 --Jz_ratio --h --field_dir --model {xxz_j1j2,kitaev,anisotropic}` plus `--Jzz --Jpm --Jpmpm --Jzpm --Gamma --Gamma_prime --g_ab --g_c` |
-| `triangular_triangle` | same flags as `triangular_site` |
+| `triangular_triangle` | `--J1 --J2 --Jz_ratio --h --field_dir --model {xxz_j1j2,kitaev,anisotropic}` plus `--Jzz --Jpm --Jpmpm --Jzpm --Gamma --Gamma_prime --g_ab --g_c` |
+
+The triangular lattice runs **only** through `triangular_triangle` (triangle-based
+expansion: order = number of triangles; order 2 = two triangles), whose properties
+are normalized **per site**. The site-based expansion is retired from the runtime
+(it converges poorly on a frustrated lattice) and is kept only as an independent
+correctness oracle.
 
 Example (anisotropic triangular model):
 
@@ -180,7 +185,7 @@ FIELDS=(0.0 0.5 1.0 2.0)
 H=${FIELDS[$SLURM_ARRAY_TASK_ID]}
 
 qed-nlce \
-    --geometry triangular_site --pipeline full_ed --max_order 8 \
+    --geometry triangular_triangle --pipeline full_ed --max_order 8 \
     --base_dir   $SCRATCH/fit/h_${H}/ \
     --cache_dir  $SCRATCH/qed_nlce_cache/triangular_o8/ \
     --J1 1.0 --h ${H} \
