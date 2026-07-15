@@ -214,10 +214,37 @@ def apply_gaussian_broadening(temp, spec_heat, sigma, broadening_type='linear'):
     return broadened
 
 
+def _n_lead_params(fixed_params, model):
+    """Number of leading (non-broadening) fit dimensions in the parameter
+    vector: the model couplings (possibly frozen via --fix_exchange) plus an
+    optional free g_c that is always appended LAST.
+    """
+    if model == 'anisotropic':
+        if fixed_params.get("fix_exchange", False):
+            n = 0  # exchange held fixed (Stage-1 g_c-only fit)
+        else:
+            n = 5 if fixed_params.get("fit_J2", False) else 4
+    elif model == 'kitaev':
+        n = 4
+    else:
+        n = 3 if fixed_params.get("fit_Jz_ratio", False) else 2
+    if fixed_params.get("fit_g_c", False):
+        n += 1
+    return n
+
+
+def _unpack_g_c(params, fixed_params, model):
+    """g_c to use this evaluation: the fitted value (last leading dim) when
+    --fit_g_c is set, otherwise the fixed g_c from fixed_params."""
+    if fixed_params.get("fit_g_c", False):
+        return float(params[_n_lead_params(fixed_params, model) - 1])
+    return float(fixed_params.get("g_c", 2.0))
+
+
 def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=None, field_dir=None):
     """
     Run triangular lattice NLCE with the given parameters.
-    
+
     Args:
         params: Parameter array depending on model type:
                 - xxz_j1j2/kitaev: [J1, J2, ...]
@@ -236,9 +263,22 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
     
     # Extract parameters based on model type
     if model == 'anisotropic':
-        n_model_params = 4
-        Jzz, Jpm, Jpmpm, Jzpm = params[:4]
-        J1, J2 = 1.0, 0.0  # Not used for anisotropic
+        fit_J2_aniso = fixed_params.get("fit_J2", False)
+        if fixed_params.get("fix_exchange", False):
+            # Stage-1 g_c fit: exchange is held fixed at its frozen values.
+            Jzz = fixed_params["fixed_Jzz"]
+            Jpm = fixed_params["fixed_Jpm"]
+            Jpmpm = fixed_params["fixed_Jpmpm"]
+            Jzpm = fixed_params["fixed_Jzpm"]
+            J2 = fixed_params.get("J2", 0.0)
+        elif fit_J2_aniso:
+            n_model_params = 5
+            Jzz, Jpm, Jpmpm, Jzpm, J2 = params[:5]
+        else:
+            n_model_params = 4
+            Jzz, Jpm, Jpmpm, Jzpm = params[:4]
+            J2 = fixed_params.get("J2", 0.0)  # fixed NNN coupling (default 0)
+        J1 = 1.0
         Gamma, Gamma_prime = None, None
     elif model == 'kitaev':
         n_model_params = 4
@@ -257,6 +297,11 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
         Jzz, Jpm, Jpmpm, Jzpm = None, None, None, None
         Gamma, Gamma_prime = None, None
     
+    # g_c is fitted (last leading dim) when --fit_g_c, else the fixed value.
+    # It scales the Zeeman term (hz = h * field_dir_z * g_c), so no change to
+    # the bare h (= mu_B B / k_B) is needed.
+    g_c_value = _unpack_g_c(params, fixed_params, model)
+
     h_value = h_field if h_field is not None else fixed_params.get("h", 0.0)
     if field_dir is None:
         field_dir = fixed_params["field_dir"]
@@ -293,7 +338,7 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
         '--thermo',
         '--base_dir', work_dir,
         '--g_ab', f'{fixed_params.get("g_ab", 2.0):.12f}',
-        '--g_c', f'{fixed_params.get("g_c", 2.0):.12f}',
+        '--g_c', f'{g_c_value:.12f}',
         '--resummation', fixed_params.get("resummation", "euler")
     ]
     
@@ -307,6 +352,8 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
         cmd.extend(['--Jpm', f'{Jpm:.12f}'])
         cmd.extend(['--Jpmpm', f'{Jpmpm:.12f}'])
         cmd.extend(['--Jzpm', f'{Jzpm:.12f}'])
+        if abs(J2) > 1e-10 or fixed_params.get('fit_J2', False):
+            cmd.extend(['--J2', f'{J2:.12f}'])  # NNN isotropic Heisenberg
     elif model == 'kitaev':
         cmd.extend(['--J1', f'{J1:.12f}'])
         cmd.extend(['--J2', f'{J2:.12f}'])
@@ -465,18 +512,15 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
     snapshot_dir = fixed_params.get("snapshot_dir", work_dir)
     iteration_counter = fixed_params.get("iteration_counter", [0])
     
-    # Determine number of model parameters
+    # Leading (non-broadening) fit dims = model couplings (possibly frozen)
+    # plus an optional free g_c. Everything past that is broadening sigmas.
     fit_Jz_ratio = fixed_params.get("fit_Jz_ratio", False)
-    if model in ('anisotropic', 'kitaev'):
-        n_model_params = 4
-    else:
-        n_model_params = 3 if fit_Jz_ratio else 2
-    
+    n_lead = _n_lead_params(fixed_params, model)
+
+    model_params = params[:n_lead]
     if fit_broadening:
-        model_params = params[:n_model_params]
-        sigmas = params[n_model_params:n_model_params+n_datasets]
+        sigmas = params[n_lead:n_lead+n_datasets]
     else:
-        model_params = params[:n_model_params]
         sigmas = [0.0] * n_datasets
     
     all_calc_temps = []
@@ -598,7 +642,22 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
             f.write(f"# Iteration {iter_num}\n")
             f.write(f"# Chi-squared: {total_chi_squared:.6f}\n")
             if model == 'anisotropic':
-                f.write(f"# Jzz={params[0]:.6f}, Jpm={params[1]:.6f}, Jpmpm={params[2]:.6f}, Jzpm={params[3]:.6f}\n")
+                _fit_J2 = fixed_params.get('fit_J2', False)
+                if fixed_params.get("fix_exchange", False):
+                    _base = (f"# Jzz={fixed_params['fixed_Jzz']:.6f} (fixed), "
+                             f"Jpm={fixed_params['fixed_Jpm']:.6f} (fixed), "
+                             f"Jpmpm={fixed_params['fixed_Jpmpm']:.6f} (fixed), "
+                             f"Jzpm={fixed_params['fixed_Jzpm']:.6f} (fixed)")
+                    if fixed_params.get("fit_g_c", False):
+                        _base += f", g_c={params[_n_lead_params(fixed_params, model)-1]:.6f}"
+                    f.write(_base + "\n")
+                else:
+                    _base = f"# Jzz={params[0]:.6f}, Jpm={params[1]:.6f}, Jpmpm={params[2]:.6f}, Jzpm={params[3]:.6f}"
+                    if _fit_J2 and len(params) > 4:
+                        _base += f", J2={params[4]:.6f}"
+                    if fixed_params.get("fit_g_c", False):
+                        _base += f", g_c={params[_n_lead_params(fixed_params, model)-1]:.6f}"
+                    f.write(_base + "\n")
             elif model == 'kitaev':
                 f.write(f"# J={params[0]:.6f}, K={params[1]:.6f}, Gamma={params[2]:.6f}, Gamma'={params[3]:.6f}\n")
             else:
@@ -626,8 +685,15 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
     # Log progress with appropriate parameter names
     model = fixed_params.get("model", "xxz_j1j2")
     if model == 'anisotropic':
-        log_msg = f"Jzz={params[0]:.4f}, Jpm={params[1]:.4f}, Jpmpm={params[2]:.4f}, Jzpm={params[3]:.4f}"
-        logging.info(f"Parameters: {log_msg}, Chi²={total_chi_squared:.4f}")
+        parts = []
+        if not fixed_params.get("fix_exchange", False):
+            parts += [f"Jzz={params[0]:.4f}", f"Jpm={params[1]:.4f}",
+                      f"Jpmpm={params[2]:.4f}", f"Jzpm={params[3]:.4f}"]
+            if fixed_params.get('fit_J2', False) and len(params) > 4:
+                parts.append(f"J2={params[4]:.4f}")
+        if fixed_params.get("fit_g_c", False):
+            parts.append(f"g_c={params[_n_lead_params(fixed_params, model)-1]:.4f}")
+        logging.info(f"Parameters: {', '.join(parts)}, Chi²={total_chi_squared:.4f}")
     elif model == 'kitaev':
         log_msg = f"J={params[0]:.4f}, K={params[1]:.4f}, Γ={params[2]:.4f}, Γ'={params[3]:.4f}"
         logging.info(f"Parameters: {log_msg}, Chi²={total_chi_squared:.4f}")
@@ -652,11 +718,9 @@ def plot_results(exp_datasets, fixed_params, best_params, work_dir, output_dir):
     colors = plt.cm.tab10(np.linspace(0, 1, len(exp_datasets)))
     model = fixed_params.get("model", "xxz_j1j2")
     fit_Jz_ratio = fixed_params.get("fit_Jz_ratio", False)
-    if model in ('anisotropic', 'kitaev'):
-        n_model_params = 4
-    else:
-        n_model_params = 3 if fit_Jz_ratio else 2
-    
+    # Leading fit dims (model couplings possibly frozen + optional free g_c).
+    n_model_params = _n_lead_params(fixed_params, model)
+
     # Use parallel fields for final plot if enabled
     n_datasets = len(exp_datasets)
     parallel_fields = fixed_params.get("parallel_fields", False)
@@ -725,9 +789,14 @@ def plot_results(exp_datasets, fixed_params, best_params, work_dir, output_dir):
                     label=f'NLCE ({label_str})')
     
     if model == 'anisotropic':
-        title_str = (f'Triangular Lattice Fit (Anisotropic): '
-                    f'Jzz={best_params[0]:.3f}, Jpm={best_params[1]:.3f}, '
-                    f'Jpmpm={best_params[2]:.3f}, Jzpm={best_params[3]:.3f}')
+        if fixed_params.get("fix_exchange", False):
+            g_c_lbl = best_params[-1] if fixed_params.get("fit_g_c", False) else fixed_params.get("g_c", 2.0)
+            title_str = (f'Triangular Lattice Fit (Anisotropic, exchange fixed): '
+                         f'g_c={g_c_lbl:.3f}')
+        else:
+            title_str = (f'Triangular Lattice Fit (Anisotropic): '
+                        f'Jzz={best_params[0]:.3f}, Jpm={best_params[1]:.3f}, '
+                        f'Jpmpm={best_params[2]:.3f}, Jzpm={best_params[3]:.3f}')
     elif model == 'kitaev':
         title_str = (f'Triangular Lattice Fit (JK\u0393\u0393\'): '
                     f'J={best_params[0]:.3f}, K={best_params[1]:.3f}, '
@@ -832,6 +901,17 @@ def main():
     parser.add_argument('--Jz_ratio_min', type=float, default=0.0, help='Min Jz_ratio for fitting')
     parser.add_argument('--Jz_ratio_max', type=float, default=1.0, help='Max Jz_ratio for fitting')
     
+    # Anisotropic model: optional NNN isotropic Heisenberg J2
+    parser.add_argument('--fit_J2', action='store_true', default=False,
+                       help='Fit NNN isotropic Heisenberg J2 (anisotropic model only). '
+                            'Adds J2 as 5th free parameter bounded by [--J2_min, --J2_max].')
+    parser.add_argument('--initial_J2_aniso', type=float, default=0.0,
+                       help='Initial J2 for anisotropic+J2 fit (default: 0.0)')
+    parser.add_argument('--J2_aniso_min', type=float, default=0.0,
+                       help='Lower bound for J2 in anisotropic model (default: 0.0, i.e. AFM NNN only)')
+    parser.add_argument('--J2_aniso_max', type=float, default=0.5,
+                       help='Upper bound for J2 in anisotropic model (default: 0.5 K)')
+
     # Anisotropic model initial values and bounds
     parser.add_argument('--initial_Jzz', type=float, default=2, help='Initial Jzz')
     parser.add_argument('--initial_Jpm', type=float, default=1, help='Initial Jpm')
@@ -845,7 +925,25 @@ def main():
     parser.add_argument('--Jpmpm_max', type=float, default=5.0, help='Max Jpmpm')
     parser.add_argument('--Jzpm_min', type=float, default=-5.0, help='Min Jzpm')
     parser.add_argument('--Jzpm_max', type=float, default=5.0, help='Max Jzpm')
-    
+
+    # g-factor tuning (anisotropic model). For B||c data (field_dir=[0,0,1])
+    # only g_c enters the Zeeman term, so g_ab is left fixed. g_c scales the
+    # field: hz = h * field_dir_z * g_c, with h = mu_B B / k_B (bare).
+    parser.add_argument('--fit_g_c', action='store_true', default=False,
+                       help='Fit the out-of-plane g-factor g_c as a free parameter '
+                            '(appended LAST to the fit vector), bounded by '
+                            '[--g_c_min, --g_c_max], initial from --g_c. '
+                            'High-field (B||c) Schottky peaks constrain g_c.')
+    parser.add_argument('--g_c_min', type=float, default=3.0,
+                       help='Lower bound for g_c when --fit_g_c (default 3.0)')
+    parser.add_argument('--g_c_max', type=float, default=4.5,
+                       help='Upper bound for g_c when --fit_g_c (default 4.5)')
+    parser.add_argument('--fix_exchange', action='store_true', default=False,
+                       help='Hold the anisotropic exchange (Jzz,Jpm,Jpmpm,Jzpm) '
+                            'FIXED at their --initial_* values and do not fit them '
+                            '(Stage-1 g_c-only fit). Requires --model anisotropic; '
+                            'typically combined with --fit_g_c.')
+
     # JKΓΓ' (Kitaev) model initial values and bounds
     parser.add_argument('--initial_J_H', type=float, default=0.0, help='Initial Heisenberg coupling J')
     parser.add_argument('--initial_J_K', type=float, default=1.0, help='Initial Kitaev coupling K')
@@ -973,6 +1071,28 @@ def main():
                             '(default: True)')
     parser.add_argument('--no_save_landscape', action='store_true',
                        help='Disable cost landscape saving')
+
+    # Warm-start (Bayesian optimization only): seed the GP with previously
+    # evaluated (params, chi2) points from one or more cost_landscape.npz files
+    # so prior compute is reused as already-evaluated x0/y0 (NOT re-run).
+    parser.add_argument('--warm_start_npz', type=str, default=None,
+                       help='Comma-separated path(s) to prior cost_landscape.npz file(s). '
+                            'Their (params, chi2) evaluations are fed to the Bayesian '
+                            'optimizer as known x0/y0 points (matched by parameter name, '
+                            'filtered to the current bounds), so the GP is guided by them '
+                            'without re-evaluating. Sets n_initial_points=0.')
+    parser.add_argument('--warm_start_params_only', action='store_true',
+                       help='Use only the PARAMETER locations from --warm_start_npz as '
+                            'seed points (x0 with NO y0), so they are RE-EVALUATED under '
+                            'the current objective. Use this when the objective changed '
+                            '(e.g. different dataset weights) so the stored chi2 values '
+                            'are no longer valid. The seeds form the initial design and '
+                            'the GP refines from there.')
+    parser.add_argument('--warm_start_top_k', type=int, default=0,
+                       help='Keep only the K best prior points (lowest stored chi2) from '
+                            '--warm_start_npz (0 = keep all). Useful with '
+                            '--warm_start_params_only to cap re-evaluation cost while '
+                            'still seeding the promising regions.')
     
     args = parser.parse_args()
     
@@ -1088,18 +1208,56 @@ def main():
     
     # Set up parameter bounds based on model type
     if args.model == 'anisotropic':
-        bounds = [
-            (args.Jzz_min, args.Jzz_max),
-            (args.Jpm_min, args.Jpm_max),
-            (args.Jpmpm_min, args.Jpmpm_max),
-            (args.Jzpm_min, args.Jzpm_max)
-        ]
-        initial_params = [args.initial_Jzz, args.initial_Jpm, args.initial_Jpmpm, args.initial_Jzpm]
-        param_names = "Jzz, Jpm, Jpmpm, Jzpm"
-        
+        fit_exchange = not args.fix_exchange
+        # --fix_exchange (Stage-1 g_c fit) implies J2 is not fit either.
+        fit_J2 = args.fit_J2 and fit_exchange
+        if fit_exchange:
+            bounds = [
+                (args.Jzz_min, args.Jzz_max),
+                (args.Jpm_min, args.Jpm_max),
+                (args.Jpmpm_min, args.Jpmpm_max),
+                (args.Jzpm_min, args.Jzpm_max)
+            ]
+            initial_params = [args.initial_Jzz, args.initial_Jpm, args.initial_Jpmpm, args.initial_Jzpm]
+            names_list = ["Jzz", "Jpm", "Jpmpm", "Jzpm"]
+            if fit_J2:
+                bounds.append((args.J2_aniso_min, args.J2_aniso_max))
+                initial_params.append(args.initial_J2_aniso)
+                names_list.append("J2")
+        else:
+            # Exchange frozen at the --initial_* values.
+            bounds = []
+            initial_params = []
+            names_list = []
+            fixed_params["fix_exchange"] = True
+            fixed_params["fixed_Jzz"]   = args.initial_Jzz
+            fixed_params["fixed_Jpm"]   = args.initial_Jpm
+            fixed_params["fixed_Jpmpm"] = args.initial_Jpmpm
+            fixed_params["fixed_Jzpm"]  = args.initial_Jzpm
+
+        fixed_params["fit_J2"] = fit_J2
+        fixed_params["J2"]     = args.initial_J2_aniso  # used when not fitting
+
+        # g_c tuning: append as the LAST fit dimension (anisotropic only).
+        fixed_params["fit_g_c"] = args.fit_g_c
+        if args.fit_g_c:
+            bounds.append((args.g_c_min, args.g_c_max))
+            initial_params.append(args.g_c)
+            names_list.append("g_c")
+
+        if not bounds:
+            logging.error("No free parameters: --fix_exchange without --fit_g_c "
+                          "leaves nothing to optimize.")
+            sys.exit(1)
+
+        param_names = ", ".join(names_list)
         logging.info(f"Fitting anisotropic model: {param_names}")
-        logging.info(f"Initial: Jzz={args.initial_Jzz}, Jpm={args.initial_Jpm}, "
-                    f"Jpmpm={args.initial_Jpmpm}, Jzpm={args.initial_Jzpm}")
+        logging.info(
+            f"Exchange {'FIXED' if not fit_exchange else 'free'} "
+            f"(Jzz={args.initial_Jzz}, Jpm={args.initial_Jpm}, "
+            f"Jpmpm={args.initial_Jpmpm}, Jzpm={args.initial_Jzpm})"
+            + (f", fit g_c in [{args.g_c_min}, {args.g_c_max}] (init {args.g_c})"
+               if args.fit_g_c else f", g_c fixed at {args.g_c}"))
     elif args.model == 'kitaev':
         bounds = [
             (args.J_H_min, args.J_H_max),
@@ -1289,21 +1447,107 @@ def main():
         if landscape_logger is not None:
             bo_callbacks.append(landscape_logger.bo_callback)
 
-        # Inject user-supplied initial guess as x0 so the GP has a
-        # strong anchor near the expected optimum instead of relying
-        # entirely on random initialization.
-        x0_list = None
-        if args.bo_inject_x0:
-            x0_free = [initial_params[i] for i in free_idx]
-            x0_list = [x0_free]
-            logging.info(f"Injecting initial guess as x0: {x0_free}")
-
         # Optionally log-transform the objective so the GP surrogate
         # models log(χ²) instead of raw χ². This compresses the
         # huge dynamic range (e.g. 20k–3.6M) into ~3–15, giving the
         # GP a much easier function to fit and dramatically improving
         # acquisition quality.
         use_log = args.bo_log_transform
+
+        # ── Warm start: reuse prior (params, chi2) evaluations ──────────────
+        # If one or more prior cost_landscape.npz files are supplied, feed
+        # their evaluations to the GP as already-known x0/y0 points (matched
+        # to the current free dimensions by parameter name, filtered to the
+        # current bounds). These are NOT re-evaluated. This takes precedence
+        # over --bo_inject_x0 (the injected guess is already covered).
+        x0_list = None
+        y0_list = None
+        if args.warm_start_npz:
+            all_names_bo = [n.strip() for n in param_names.split(',')]
+            warm_pts = []  # list of (xfree, chi2_old)
+            for npz_path in args.warm_start_npz.split(','):
+                npz_path = npz_path.strip()
+                if not npz_path:
+                    continue
+                if not os.path.exists(npz_path):
+                    logging.warning(f"Warm-start file not found, skipping: {npz_path}")
+                    continue
+                d = np.load(npz_path, allow_pickle=True)
+                ev = d['evaluations']
+                names = [str(x) for x in d['param_names']]
+                if ev.size == 0:
+                    continue
+                col = {nm: k for k, nm in enumerate(names)}
+                if not all(all_names_bo[i] in col for i in free_idx):
+                    logging.warning(f"Warm-start {npz_path}: param names "
+                                    f"{names} do not cover free dims "
+                                    f"{[all_names_bo[i] for i in free_idx]}; skipping.")
+                    continue
+                kept = 0
+                for row in ev:
+                    chi2 = float(row[-1])
+                    if not np.isfinite(chi2) or chi2 <= 0:
+                        continue
+                    xfree = [float(row[col[all_names_bo[i]]]) for i in free_idx]
+                    if not all(bounds[i][0] <= xfree[j] <= bounds[i][1]
+                               for j, i in enumerate(free_idx)):
+                        continue
+                    warm_pts.append((xfree, chi2))
+                    kept += 1
+                logging.info(f"Warm-start {os.path.basename(npz_path)}: "
+                             f"loaded {kept}/{len(ev)} usable points.")
+
+            # Optionally keep only the K best (lowest stored chi2) points.
+            if args.warm_start_top_k and args.warm_start_top_k > 0 \
+                    and len(warm_pts) > args.warm_start_top_k:
+                warm_pts.sort(key=lambda t: t[1])
+                warm_pts = warm_pts[:args.warm_start_top_k]
+                logging.info(f"Warm-start: kept top {len(warm_pts)} points "
+                             f"by stored chi2.")
+
+            if warm_pts:
+                warm_x0 = [p[0] for p in warm_pts]
+                if args.warm_start_params_only:
+                    # Objective changed: stored chi2 is invalid. Re-evaluate the
+                    # seed locations under the current objective; they form the
+                    # initial design and the GP refines from there. With x0 and
+                    # no y0, skopt evaluates the seeds AND counts them toward
+                    # n_calls, requiring n_calls >= len(x0) + n_initial_points;
+                    # we use n_initial_points=0 so there are no extra random
+                    # points beyond the seeds.
+                    if len(warm_x0) >= n_calls:
+                        warm_x0 = warm_x0[:max(1, n_calls - 1)]
+                        logging.warning(f"Warm-start seeds ({len(warm_pts)}) >= "
+                                        f"n_calls ({n_calls}); truncating seeds to "
+                                        f"{len(warm_x0)} to leave room for GP calls.")
+                    x0_list = warm_x0
+                    y0_list = None
+                    n_initial_points = 0
+                    logging.info(f"Warm-start (params-only): {len(warm_x0)} prior "
+                                 f"parameter locations will be RE-EVALUATED as the "
+                                 f"initial design (stored chi2 ignored); "
+                                 f"{n_calls - len(warm_x0)} further model-guided "
+                                 f"calls after that.")
+                else:
+                    x0_list = warm_x0
+                    y0_list = [float(np.log(p[1])) if use_log else p[1]
+                               for p in warm_pts]
+                    n_initial_points = 0
+                    logging.info(f"Warm-start: seeding GP with {len(warm_x0)} prior "
+                                 f"evaluations (reusing stored chi2); "
+                                 f"n_initial_points set to 0, "
+                                 f"{n_calls} new model-guided calls to run.")
+            else:
+                logging.warning("Warm-start requested but no usable prior "
+                                "points were loaded; falling back to normal init.")
+
+        # Inject user-supplied initial guess as x0 so the GP has a
+        # strong anchor near the expected optimum instead of relying
+        # entirely on random initialization. (Skipped when warm-starting.)
+        if x0_list is None and args.bo_inject_x0:
+            x0_free = [initial_params[i] for i in free_idx]
+            x0_list = [x0_free]
+            logging.info(f"Injecting initial guess as x0: {x0_free}")
 
         def _expand_params(x_free):
             """Expand reduced BO vector back to full parameter vector."""
@@ -1332,6 +1576,7 @@ def main():
             n_initial_points=n_initial_points,
             acq_func=args.acq_func,
             x0=x0_list,
+            y0=y0_list,
             random_state=42,
             verbose=True,
             callback=bo_callbacks if bo_callbacks else None,
@@ -1359,17 +1604,23 @@ def main():
     logging.info("Optimization completed!")
     
     if args.model == 'anisotropic':
-        logging.info(f"Best Jzz: {best_params[0]:.6f}")
-        logging.info(f"Best Jpm: {best_params[1]:.6f}")
-        logging.info(f"Best Jpmpm: {best_params[2]:.6f}")
-        logging.info(f"Best Jzpm: {best_params[3]:.6f}")
+        # Map the (variable-length) fitted vector back onto named params,
+        # then fill in any frozen exchange / fixed g_c so the record is complete.
+        _names = [n.strip() for n in param_names.split(',')] if param_names else []
+        _fitted = {nm: float(v) for nm, v in zip(_names, best_params)}
+        bp = {
+            'Jzz':   _fitted.get('Jzz',   float(fixed_params.get('fixed_Jzz',   args.initial_Jzz))),
+            'Jpm':   _fitted.get('Jpm',   float(fixed_params.get('fixed_Jpm',   args.initial_Jpm))),
+            'Jpmpm': _fitted.get('Jpmpm', float(fixed_params.get('fixed_Jpmpm', args.initial_Jpmpm))),
+            'Jzpm':  _fitted.get('Jzpm',  float(fixed_params.get('fixed_Jzpm',  args.initial_Jzpm))),
+        }
+        if 'J2' in _fitted:
+            bp['J2'] = _fitted['J2']
+        bp['g_c'] = _fitted.get('g_c', float(args.g_c))
+        for _k, _v in bp.items():
+            logging.info(f"Best {_k}: {_v:.6f}")
         results_dict = {
-            'best_params': {
-                'Jzz': float(best_params[0]),
-                'Jpm': float(best_params[1]),
-                'Jpmpm': float(best_params[2]),
-                'Jzpm': float(best_params[3])
-            },
+            'best_params': bp,
             'chi_squared': float(best_chi_sq),
             'fixed_params': fixed_params
         }

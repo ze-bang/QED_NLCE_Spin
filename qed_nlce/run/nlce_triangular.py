@@ -15,9 +15,14 @@ directly::
         --geometry=triangular_site --pipeline=full_ed --max_order=4 ...
 
 The translation layer below maps the legacy flag set onto the
-unified CLI's flags. The historical ``--site_based`` flag picks the
-``triangular_site`` geometry; without it, the default
-``triangular_triangle`` is used (matching the legacy behaviour).
+unified CLI's flags.
+
+NLCE on the triangular lattice runs ONLY through the triangle-based
+expansion (``triangular_triangle``, order = number of triangles: order 2
+is two triangles, and so on), which is normalized PER SITE. The legacy
+``--site_based`` flag is retired -- the site-based expansion converges
+poorly on a frustrated lattice and now exists only as a correctness
+oracle (see ``geometries/triangular_site.py``).
 """
 
 from __future__ import annotations
@@ -45,7 +50,17 @@ def _translate_argv(argv: list[str]) -> list[str]:
     * ``--method=FTLM*``    -> ``--pipeline=ftlm``
     * everything else       -> ``--pipeline=full_ed`` (forwards --method)
     """
-    geometry = "triangular_site" if "--site_based" in argv else "triangular_triangle"
+    # Triangle-based expansion is the ONLY NLCE path on the triangular lattice
+    # (per-site normalized). --site_based is retired; fail loudly rather than
+    # silently running a different expansion.
+    if "--site_based" in argv:
+        raise SystemExit(
+            "--site_based is retired: NLCE on the triangular lattice runs only "
+            "through the triangle-based expansion (order = #triangles), which "
+            "is per-site normalized. The site-based expansion is kept solely as "
+            "a correctness oracle (geometries/triangular_site.py)."
+        )
+    geometry = "triangular_triangle"
 
     method_token = ""
     for tok in argv:

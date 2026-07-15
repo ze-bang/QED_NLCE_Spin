@@ -100,16 +100,21 @@ PYROCHLORE_EXPECTED_MULTS = {
 # Triangle-based NLCE reference values from the generator docstring
 # (generate_triangle_nlce_clusters.py): order -> (num_clusters, Sum-L).
 # Orders 1-8 reproduced by generation on the default L = order+3
-# lattice (order 8: 299 clusters, Sum-L = 5563, ~105 s).
+# lattice (order 8: 299 clusters, ~105 s).
+#
+# L is the PER-SITE lattice constant (#up-triangles == #sites), consistent
+# with the per-site order-0 cluster. These are 3x the pre-2026-07 values,
+# which normalized orders>=1 per BOND (3 bonds/site) and made every summed
+# property 3x too small. Per-site lattice constants are integers.
 TRIANGLE_BASED_REFERENCE = {
-    1: (1, Fraction(1, 3)),
-    2: (1, Fraction(1)),
-    3: (3, Fraction(11, 3)),
-    4: (5, Fraction(44, 3)),
-    5: (12, Fraction(62)),
-    6: (35, Fraction(814, 3)),
-    7: (98, Fraction(3652, 3)),
-    8: (299, Fraction(5563)),
+    1: (1, Fraction(1)),
+    2: (1, Fraction(3)),
+    3: (3, Fraction(11)),
+    4: (5, Fraction(44)),
+    5: (12, Fraction(186)),
+    6: (35, Fraction(814)),
+    7: (98, Fraction(3652)),
+    8: (299, Fraction(16689)),
 }
 
 

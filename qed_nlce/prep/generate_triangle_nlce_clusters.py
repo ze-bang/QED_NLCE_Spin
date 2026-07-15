@@ -16,16 +16,25 @@ The isomorphism criterion is the physical lattice structure induced by the
 triangles, NOT the meta-graph topology. This correctly captures that clusters
 with the same meta-graph topology but different site counts are distinct.
 
-Reference cluster counts (triangle-based NLCE):
+Reference cluster counts (triangle-based NLCE). L is the PER-SITE lattice
+constant (embeddings per lattice site), so that P/N_sites = sum_c L_c * W_c.
+Because #up-triangles == #sites, L = raw_count / N_triangles.
+
   Order 0: 1 cluster  (single site)           ΣL = 1
-  Order 1: 1 cluster  (single triangle)       ΣL = 1/3
-  Order 2: 1 cluster  (two triangles)         ΣL = 1
-  Order 3: 3 clusters                         ΣL = 11/3
-  Order 4: 5 clusters                         ΣL = 44/3
-  Order 5: 12 clusters                        ΣL = 62
-  Order 6: 35 clusters                        ΣL = 814/3
-  Order 7: 98 clusters                        ΣL = 3652/3
-  Order 8: 299 clusters                       ΣL = 5563
+  Order 1: 1 cluster  (single triangle)       ΣL = 1
+  Order 2: 1 cluster  (two triangles)         ΣL = 3
+  Order 3: 3 clusters                         ΣL = 11
+  Order 4: 5 clusters                         ΣL = 44
+  Order 5: 12 clusters                        ΣL = 186
+  Order 6: 35 clusters                        ΣL = 814
+  Order 7: 98 clusters                        ΣL = 3652
+  Order 8: 299 clusters                       ΣL = 16689
+
+(Older revisions divided orders>=1 by 3*N_triangles, i.e. the BOND count,
+giving ΣL = 1/3, 1, 11/3, 44/3, 62, 814/3, 3652/3, 5563 -- a per-bond
+normalization inconsistent with the per-site order-0 cluster, which made the
+summed properties exactly 3x too small. Cluster caches generated before this
+fix carry the old multiplicities and MUST be regenerated.)
 """
 
 import argparse
@@ -426,7 +435,20 @@ def generate_triangle_clusters(meta_graph, triangles, max_order,
         order_mults = []
         
         for rep_nodes, raw_count in cert_map.values():
-            L = Fraction(raw_count, 3 * N_triangles)
+            # PER-SITE lattice constant. The expansion uses up-pointing
+            # triangles only, and #up-triangles == #sites, so N_triangles is
+            # the site count and raw_count/N_triangles is embeddings-per-site
+            # -- the standard NLCE normalization, matching the order-0
+            # single-site cluster (L=1, set in main()).
+            #
+            # This previously divided by 3*N_triangles (= the BOND count,
+            # since the lattice has 3 bonds/site), which made every order>=1
+            # lattice constant a factor 3 too small while order 0 stayed
+            # per-site. The mixed convention made the whole NLCE sum -- and
+            # therefore every fitted coupling -- 3x off: the summed C(T)
+            # failed the exact high-T limit C = 3R*Jzz^2/(16T^2) by exactly
+            # 1/3, whereas the site-based expansion passed it.
+            L = Fraction(raw_count, N_triangles)
             order_clusters.append(rep_nodes)
             order_mults.append(L)
         

@@ -117,10 +117,24 @@ def _precompute_basis_for_cluster(
     return True
 
 
-@register_geometry
+# RETIRED from the runtime path (2026-07): the triangle-based expansion
+# (`triangular_triangle`, order = #triangles) is the ONLY way NLCE runs on the
+# triangular lattice -- it converges far better on a frustrated lattice, which
+# is the whole point of the triangle expansion.
+#
+# This class is deliberately NOT registered, so it cannot be selected via
+# --geometry, but the module stays importable because:
+#   * triangular_triangle reuses its argument/Hamiltonian/basis helpers, and
+#   * the site-based expansion is an INDEPENDENT correctness oracle -- it is
+#     what exposed the per-bond/per-site normalization bug in the triangle
+#     generator (site passed the exact high-T limit while triangle came out
+#     exactly 3x small). Keep it for that cross-check.
 class TriangularSite(Geometry):
     name = "triangular_site"
-    description = "Triangular lattice; site-based NLCE expansion (order = sites)."
+    description = (
+        "Triangular lattice; site-based NLCE (order = sites). RETIRED from the "
+        "runtime path -- kept only as an independent correctness oracle."
+    )
 
     default_temp_min = 0.1
     default_temp_max = 10.0

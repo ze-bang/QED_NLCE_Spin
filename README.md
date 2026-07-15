@@ -25,7 +25,7 @@ QED repository. Other runtime dependencies are `numpy`, `scipy`, `h5py`,
 ## Quick start
 
 ```bash
-qed-nlce --geometry triangular_site --pipeline full_ed \
+qed-nlce --geometry triangular_triangle --pipeline full_ed \
          --max_order 8 \
          --J1 1.0 --temp_min 0.1 --temp_max 10 --temp_bins 100 --thermo \
          --base_dir output/tri_full_o8
@@ -100,7 +100,7 @@ topological cluster sets. See `qed_nlce/prep/_bond_color.py` and
 | `qed_nlce.ed` | ED layer: `full_spectrum_qed` (exact tier), `oftlm_thermodynamics` (stochastic tier), `thermodynamics`; plus the pure-Python `solve_spectrum` correctness oracle. |
 | `qed_nlce.hamiltonians` | Cluster file reader + pyrochlore / triangular operator builders. |
 | `qed_nlce.core` | `Geometry` / `Pipeline` abstractions, `NLCEWorkflow` orchestrator, in-process ED dispatch, caches. |
-| `qed_nlce.geometries` | Concrete lattices: `pyrochlore`, `triangular_site`, `triangular_triangle`. |
+| `qed_nlce.geometries` | Concrete lattices: `pyrochlore`, `triangular_triangle` (the triangular NLCE: order = number of triangles, normalized per site). `triangular_site` is retired from the runtime path and kept only as a correctness oracle. |
 | `qed_nlce.pipelines` | The `full_ed` pipeline. |
 | `qed_nlce.prep` | Cluster generators (graph enumeration, bond-colored certificates). |
 | `qed_nlce.run` | NLCE summation kernels + per-lattice driver scripts. |

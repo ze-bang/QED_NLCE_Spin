@@ -24,6 +24,7 @@ import numpy as np
 
 from .operator import SpinHalfOperator
 from .oftlm import spinhalf_to_qed
+from .dense import solve_spectrum
 
 __all__ = ["full_spectrum_qed"]
 
@@ -73,28 +74,32 @@ def full_spectrum_qed(
     n = int(op.num_sites)
 
     t0 = time.monotonic()
-    # Small-cluster fast path: below ~2^12 the plain dense eigensolve is
-    # milliseconds, while symmetry='auto' pays a fixed per-call cost
-    # (automorphism search + three discrete-symmetry detections + a
-    # per-cluster tmpdir round-trip for the streaming lane) of order
-    # seconds. NLCE runs solve HUNDREDS of tiny clusters, so auto-detect
-    # overhead would dominate the whole exact tier. Correctness is
-    # unaffected -- plain dense is the reference the symmetry paths are
-    # tested against.
-    if n <= 12:
-        res = qed.full_spectrum(
-            qop, symmetry=None, spin_flip="off", time_reversal="off",
-            device=device,
+    # Small/NLCE-cluster fast path: route through the symmetry-adapted
+    # Python eigensolver (Sz-PARITY Z2 + spatial automorphisms + spin-flip
+    # + time-reversal), NOT qed.full_spectrum(symmetry=None).
+    #
+    # MEASURED (2026-07-07, anisotropic J±± cluster, i.e. U(1)-Sz broken):
+    #   qed.full_spectrum(symmetry=None) builds the FULL 2^N dense matrix
+    #   and takes >120 s for N=12 (dim 4096) -- the "plain dense is
+    #   milliseconds" assumption only holds for U(1)-Sz-CONSERVING models;
+    #   with Sz broken there is no block reduction on that path at all.
+    #   solve_spectrum does the identical spectrum in ~0.4 s (N=12) / ~2.6 s
+    #   (N=13) via Sz-PARITY + spatial, with no C++/tmpdir round-trip and no
+    #   symmetry='auto' per-call overhead. It IS the parity-test oracle, so
+    #   eigenvalues match to machine precision. This was the dominant cost
+    #   of the anisotropic NLCE exact tier (~47 min/eval -> ~1-2 min/eval).
+    if n <= 14:
+        evals = np.asarray(
+            solve_spectrum(op, use_symmetry=True), dtype=np.float64
         )
-        evals = np.asarray(sorted(res.eigenvalues), dtype=np.float64)
         if evals.shape[0] != (1 << n):
             raise RuntimeError(
-                f"[{log_tag}] qed.full_spectrum returned {evals.shape[0]} "
+                f"[{log_tag}] solve_spectrum returned {evals.shape[0]} "
                 f"eigenvalues for N={n}, expected {1 << n}."
             )
         logging.info(
-            "[%s] N=%d exact spectrum via qed.full_spectrum (plain dense): "
-            "%d eigenvalues, %.2fs",
+            "[%s] N=%d exact spectrum via solve_spectrum "
+            "(Sz-parity + spatial): %d eigenvalues, %.2fs",
             log_tag, n, evals.shape[0], time.monotonic() - t0,
         )
         return evals
