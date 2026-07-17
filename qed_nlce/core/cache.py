@@ -286,6 +286,10 @@ class EigenvalueCacheKey:
     # of silently replaying results computed under the old policy.
     ed_engine: str = "qed-engine-v2"
     point_group: str = "auto"
+    # Routing policy: False (default) = EXACT-ONLY (over-cap clusters warn
+    # and solve exactly); True = stochastic OFTLM fallback for over-cap
+    # clusters. Decides which tier produced a cached result.
+    oftlm_fallback: bool = False
 
     def digest(self) -> str:
         payload = json.dumps(asdict(self), sort_keys=True).encode("utf-8")
@@ -401,6 +405,7 @@ class EigenvalueCache:
             cluster_graph_hash=graph_hash,
             hamiltonian_content_hash=ham_hash,
             point_group=str(getattr(options, "point_group", "auto")),
+            oftlm_fallback=bool(getattr(options, "oftlm_fallback", False)),
         )
 
     # ----- on-disk layout -----

@@ -113,6 +113,14 @@ class FullEDPipeline(Pipeline):
                             "'off' keeps the abelian lane; 'full' requires "
                             "projection and raises with the decline reason. "
                             "Part of the eigenvalue cache key.")
+        g.add_argument("--oftlm_fallback", action="store_true",
+                       help="Restore the stochastic OFTLM tier for clusters "
+                            "that exceed the exact-tier caps. DEFAULT IS "
+                            "EXACT-ONLY: over-cap clusters warn loudly and "
+                            "solve exactly anyway, because NLCE weight "
+                            "subtraction amplifies stochastic error by "
+                            "~(T/J)^-order and deep-order OFTLM weights are "
+                            "noise-dominated (measured at order 6).")
         g.add_argument("--oftlm_num_seeds", type=int, default=2,
                        help="OFTLM: number of independent seeds the sample "
                             "budget is split across (default 2). >= 2 yields "
@@ -157,6 +165,7 @@ class FullEDPipeline(Pipeline):
             oftlm_num_samples=getattr(args, "oftlm_num_samples", 20),
             oftlm_krylov_dim=getattr(args, "oftlm_krylov_dim", 100),
             oftlm_num_seeds=getattr(args, "oftlm_num_seeds", 2),
+            oftlm_fallback=getattr(args, "oftlm_fallback", False),
             exact_max_block=getattr(args, "exact_max_block", 120_000),
             exact_max_sector=getattr(args, "exact_max_sector", 800_000),
             device=getattr(args, "device", "cpu"),

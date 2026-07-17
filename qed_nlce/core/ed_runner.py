@@ -64,6 +64,14 @@ class EDOptions:
     # exactly in 3.65 h (verify_order7_exact.py, 2026-07-06). Cap raised
     # 200k -> 800k to admit order 7; order 8 (C(25,12)=5.2M) still excluded.
     exact_max_sector: int = 800_000
+    # EXACT-ONLY routing (the default): every cluster runs the exact
+    # full-spectrum tier. NLCE weight subtraction amplifies any stochastic
+    # error by ~(T/J)^-order, so OFTLM results at deep orders are noise --
+    # when a cluster exceeds the exact-tier caps the runner now WARNS
+    # (job may run very long / exhaust memory) and solves exactly anyway.
+    # Set True to restore the stochastic OFTLM fallback for over-cap
+    # clusters (error bands are still propagated when it runs).
+    oftlm_fallback: bool = False
     device: str = "cpu"                  # qed.full_spectrum backend device
     # qed point-group routing for the exact tier: "auto" (default)
     # projects through the factorized little-group lane where it accepts

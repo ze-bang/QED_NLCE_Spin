@@ -10,15 +10,19 @@ Runs a single cluster's ED in-process, entirely on the QED library via
     (:func:`~qed_nlce.ed.engine.resolve_cluster_symmetry`: spatial
     GeneratorSet with the non-abelian residue, U(1)-Sz / native
     Sz-parity / spin-flip / time-reversal flags),
-  * below ``options.oftlm_cutoff`` (raw Hilbert dim) -- or whenever the
-    block-aware plan (:func:`~qed_nlce.ed.engine.plan_exact_solve`)
-    says the largest symmetry block fits this machine -- full EXACT
-    diagonalization via :func:`~qed_nlce.ed.engine.full_spectrum`
-    (one ``qed.full_spectrum`` call carrying ALL of that symmetry);
-  * otherwise: matrix-free OFTLM (:func:`qed_nlce.ed.oftlm_thermodynamics`),
-    producing per-cluster thermodynamics directly (no eigenvalue
-    spectrum) for clusters too large to diagonalize exactly even with
-    full symmetry reduction.
+  * EXACT full diagonalization for EVERY cluster (the default policy)
+    via :func:`~qed_nlce.ed.engine.full_spectrum` -- one
+    ``qed.full_spectrum`` call carrying ALL of that symmetry. Above
+    ``options.oftlm_cutoff`` the block-aware plan
+    (:func:`~qed_nlce.ed.engine.plan_exact_solve`) is consulted as an
+    ADVISORY: an over-cap cluster logs a loud warning (the job may run
+    very long or exhaust memory) but still solves exactly, because NLCE
+    weight subtraction amplifies stochastic error by ~(T/J)^-order;
+  * only with ``options.oftlm_fallback`` (``--oftlm_fallback``): over-cap
+    clusters fall back to matrix-free OFTLM
+    (:func:`qed_nlce.ed.oftlm_thermodynamics`), producing per-cluster
+    thermodynamics directly (no eigenvalue spectrum) with
+    independent-seed error bands.
 
 Both tiers persist to ``<output_dir>/output/ed_results.h5`` (the
 on-disk contract the NLCE summation kernels read) -- eigenvalues under
@@ -234,13 +238,30 @@ def run_ed_in_process(
         # feeds the feasibility plan AND the solve, so the router can no
         # longer disagree with what qed does at solve time.
         cs = resolve_cluster_symmetry(qop)
-        # Exact whenever possible: below the raw cutoff always; above it,
-        # whenever the block-aware plan says the largest symmetry block
-        # fits this machine. NLCE weight cancellation makes stochastic
-        # solvers unusable at deep orders, so OFTLM is strictly a last
-        # resort.
-        if hilbert_dim <= cutoff or plan_exact_solve(
-                qop, cs, options, log_tag=log_tag).feasible:
+        # EXACT-ONLY policy (default): NLCE weight subtraction amplifies
+        # stochastic error by ~(T/J)^-order, so a noisy tier at deep
+        # orders is worse than useless. The block-aware plan is consulted
+        # above the raw cutoff purely as an ADVISORY: an over-cap cluster
+        # gets a loud warning (the job may run very long or exhaust
+        # memory) and is solved exactly anyway. --oftlm_fallback restores
+        # the stochastic tier for over-cap clusters.
+        plan = None
+        if hilbert_dim > cutoff:
+            plan = plan_exact_solve(qop, cs, options, log_tag=log_tag)
+        go_exact = (plan is None or plan.feasible
+                    or not bool(getattr(options, "oftlm_fallback", False)))
+        if go_exact:
+            if plan is not None and not plan.feasible:
+                logging.warning(
+                    "[%s] EXACT-ONLY: cluster exceeds the exact-tier caps "
+                    "(%s). Solving exactly anyway -- this job may run very "
+                    "long or exhaust memory; raise --exact_max_block/"
+                    "--exact_max_sector deliberately, or pass "
+                    "--oftlm_fallback to restore the stochastic tier "
+                    "(error bands propagate, but deep-order NLCE weights "
+                    "will be noise-dominated).",
+                    log_tag, plan.reason,
+                )
             evals = full_spectrum(
                 qop, cs,
                 device=getattr(options, "device", "cpu"),
