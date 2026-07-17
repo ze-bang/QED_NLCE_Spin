@@ -112,7 +112,12 @@ class FullEDPipeline(Pipeline):
                             "rep lane with star/TR/flip folds otherwise; "
                             "'off' keeps the abelian lane; 'full' requires "
                             "projection and raises with the decline reason. "
-                            "Part of the eigenvalue cache key.")
+                            "Part of the eigenvalue cache key. Measured "
+                            "2026-07-17 (19-site order-6 pyrochlore tree, "
+                            "|A|=24, 47 residues, full 2^19 spectrum): "
+                            "projection 274 s vs abelian folds 232 s, "
+                            "identical spectra -- auto stays default for the "
+                            "feasibility headroom of smaller blocks.")
         g.add_argument("--oftlm_fallback", action="store_true",
                        help="Restore the stochastic OFTLM tier for clusters "
                             "that exceed the exact-tier caps. DEFAULT IS "
