@@ -69,16 +69,48 @@ def assert_qed_available() -> None:
     and a missing/broken install only surfaces after hours of earlier
     cluster work; call this once at workflow start instead.
     """
+    import sys
+
+    # PROACTIVE build pin (must run BEFORE the first `import qed`): a stale
+    # scikit-build EDITABLE FINDER on sys.meta_path resolves qed as a MIXED
+    # import (source-tree __init__.py + site-packages submodules) that
+    # FLIP-FLOPS between identical invocations -- and once the wrong
+    # _core.so has loaded, pybind's process-global type registration makes
+    # any in-process retry impossible ("type 'Op' is already registered").
+    # When the sibling QED source tree carries a built _core and such a
+    # finder is present, strip the finder and front-pin the source tree;
+    # wheel-only installs (no sibling tree) are untouched.
+    if "qed" not in sys.modules:
+        qed_py = os.path.abspath(os.path.join(
+            os.path.dirname(__file__), "..", "..", "..", "QED", "python"))
+        so_dir = os.path.join(qed_py, "qed")
+        has_core = os.path.isdir(so_dir) and any(
+            f.startswith("_core") and f.endswith(".so")
+            for f in os.listdir(so_dir))
+        has_editable_finder = any(
+            "editable" in type(f).__module__.lower() for f in sys.meta_path)
+        if has_core and has_editable_finder:
+            sys.meta_path = [
+                f for f in sys.meta_path
+                if "editable" not in type(f).__module__.lower()
+            ]
+            sys.path = [p for p in sys.path if p != qed_py]
+            sys.path.insert(0, qed_py)
+            logging.info(
+                "qed build pinned to the sibling source tree at %s "
+                "(editable finder stripped; it mixes source and "
+                "site-packages modules and flip-flops between runs).",
+                qed_py)
     try:
         import qed  # noqa: F401
         from qed import _core  # noqa: F401
     except ImportError as exc:
         raise ImportError(
             "The 'qed' C++ package is required for the QED_NLCE exact-ED "
-            "and OFTLM backends (qed_nlce.ed.engine / qed_nlce.ed.oftlm). "
-            "Install it (see the sibling QED repo) before running any "
-            "pipeline -- failing now rather than after cluster work has "
-            f"already run. Original error: {exc}"
+            "backend (qed_nlce.ed.engine / qed_nlce.ed.oftlm). Install it "
+            "(see the sibling QED repo) before running any pipeline -- "
+            "failing now rather than after cluster work has already run. "
+            f"Original error: {exc}"
         ) from exc
 
 
