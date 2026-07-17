@@ -27,8 +27,9 @@ except ImportError:
 class NLCExpansionTriangular:
     """NLCE calculator for triangular lattice."""
     
-    def __init__(self, cluster_dir, eigenvalue_dir, temp_min=None, temp_max=None, num_temps=None, 
-                 measure_spin=False, SI_units=False, temp_points=None):
+    def __init__(self, cluster_dir, eigenvalue_dir, temp_min=None, temp_max=None, num_temps=None,
+                 measure_spin=False, SI_units=False, temp_points=None,
+                 energy_unit="dimensionless"):
         """
         Initialize the NLC expansion calculator for triangular lattice.
         
@@ -59,10 +60,23 @@ class NLCExpansionTriangular:
         """
         self.cluster_dir = cluster_dir
         self.eigenvalue_dir = eigenvalue_dir
-        
+
         self.SI = SI_units
+        # energy_unit: "dimensionless"/"K" (default, no conversion: kB=1,
+        # E and T on the same scale) or "meV" (couplings in meV against a
+        # Kelvin grid -> multiply every ED energy by 1/kB = 11.6045 K/meV;
+        # stored P(T) grids are rescaled likewise). CODATA:
+        # kB = 8.617333262e-2 meV/K.
+        if energy_unit not in ("dimensionless", "K", "meV"):
+            raise ValueError(f"energy_unit must be dimensionless/K/meV, "
+                             f"got {energy_unit!r}")
+        self.energy_unit = energy_unit
+        self.e_scale = (1.0 / 8.617333262e-2) if energy_unit == "meV" else 1.0
+        if self.e_scale != 1.0:
+            print(f"Energy unit: {energy_unit} -> scaling all ED energies "
+                  f"by 1/kB = {self.e_scale:.6f} K/{energy_unit}")
         self.measure_spin = measure_spin
-        
+
         if temp_points is not None:
             self.temp_values = np.sort(np.asarray(temp_points, dtype=float))
         else:
@@ -250,12 +264,17 @@ class NLCExpansionTriangular:
                       f"(flat) and wrong. Rerun ED with matching "
                       f"--temp_min/--temp_max.")
             order = np.argsort(T_src)
-            T_src = T_src[order]
+            # energy_unit=meV: the stored P(T) was computed with T on the
+            # COUPLING (meV) scale -- rescale its temperature axis AND its
+            # energy values by 1/kB; Cv and S are dimensionless, unchanged.
+            T_src = T_src[order] * self.e_scale
             result = {}
             R = 6.02214076e23 * 1.380649e-23  # 8.314462618 J/(mol·K)
             for prop in field_map:
                 vals = quantities[prop][order]
                 interp = np.interp(self.temp_values, T_src, vals)
+                if prop == "energy":
+                    interp = interp * self.e_scale
                 if self.SI:
                     interp = interp * R
                 result[prop] = interp
@@ -267,6 +286,8 @@ class NLCExpansionTriangular:
                     err = np.interp(
                         self.temp_values, T_src,
                         np.asarray(grp[key][:], dtype=float)[order])
+                    if prop == "energy":
+                        err = err * self.e_scale
                     if self.SI:
                         err = err * R
                     result[key] = err
@@ -408,6 +429,10 @@ class NLCExpansionTriangular:
                     'entropy': np.zeros_like(self.temp_values)
                 }
 
+        # energy_unit=meV: scale eigenvalues onto the Kelvin grid (1.0 for
+        # the default dimensionless/K convention -- see __init__).
+        if self.e_scale != 1.0:
+            eigenvalues = np.asarray(eigenvalues, dtype=float) * self.e_scale
         ground_state_energy = np.min(eigenvalues)
         shifted = eigenvalues - ground_state_energy
 
@@ -1243,6 +1268,15 @@ def main():
                        help='Compute spin expectation values')
     parser.add_argument('--SI_units', action='store_true',
                        help='Convert to SI units: C,S in J/(mol·K), E in J/mol.')
+    parser.add_argument('--energy_unit', type=str, default='dimensionless',
+                       choices=['dimensionless', 'K', 'meV'],
+                       help='Unit of the ED energies relative to the temperature '
+                            'grid. Default (dimensionless / K): kB=1, T and E on '
+                            'the same scale -- no conversion (the historical '
+                            'behaviour). meV: couplings were written in meV and '
+                            'the temperature grid is in KELVIN -> all energies '
+                            '(eigenvalues, stored P(T) curves and their grids) '
+                            'are multiplied by 1/kB = 11.6045 K/meV.')
     parser.add_argument('--resummation', type=str, default='none',
                        choices=['none', 'direct', 'auto', 'euler', 'wynn',
                                 'wynn_multi', 'brezinski', 'aitken', 'pade',
@@ -1277,7 +1311,8 @@ def main():
             eigenvalue_dir=args.eigenvalue_dir,
             measure_spin=args.measure_spin,
             SI_units=args.SI_units,
-            temp_points=temp_points
+            temp_points=temp_points,
+            energy_unit=args.energy_unit
         )
     else:
         nlc = NLCExpansionTriangular(
@@ -1287,7 +1322,8 @@ def main():
             temp_max=args.temp_max,
             num_temps=args.temp_bins,
             measure_spin=args.measure_spin,
-            SI_units=args.SI_units
+            SI_units=args.SI_units,
+            energy_unit=args.energy_unit
         )
     
     # Read data

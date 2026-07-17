@@ -55,19 +55,37 @@ def _parse_cluster_file(file_path):
 
 
 class NLCExpansion:
-    def __init__(self, cluster_dir, eigenvalue_dir, temp_min, temp_max, num_temps, measure_spin, SI_units=False):
+    def __init__(self, cluster_dir, eigenvalue_dir, temp_min, temp_max, num_temps, measure_spin, SI_units=False,
+                 energy_unit="dimensionless"):
         """
         Initialize the NLC expansion calculator.
-        
+
         Args:
             cluster_dir: Directory containing cluster information files
             eigenvalue_dir: Directory containing eigenvalue files from ED calculations
             temp_values: Array of inverse temperature values to evaluate
+            energy_unit: Unit of the ED eigenvalues / P(T) energies relative
+                to the KELVIN temperature grid. The kernel is otherwise
+                unit-agnostic (kB = 1: T and E in the same units).
+                "dimensionless" / "K" (default): no conversion.
+                "meV": couplings were written in meV -> every energy is
+                multiplied by 1/kB = 11.6045 K/meV (and stored P(T) grids
+                rescaled likewise) so exp(-E/kB T) is dimensionless against
+                a Kelvin grid.
         """
         self.cluster_dir = cluster_dir
         self.eigenvalue_dir = eigenvalue_dir
-        
+
         self.SI = SI_units  # Flag for SI units
+        # CODATA: kB = 8.617333262e-2 meV/K.
+        if energy_unit not in ("dimensionless", "K", "meV"):
+            raise ValueError(f"energy_unit must be dimensionless/K/meV, "
+                             f"got {energy_unit!r}")
+        self.energy_unit = energy_unit
+        self.e_scale = (1.0 / 8.617333262e-2) if energy_unit == "meV" else 1.0
+        if self.e_scale != 1.0:
+            print(f"Energy unit: {energy_unit} -> scaling all ED energies "
+                  f"by 1/kB = {self.e_scale:.6f} K/{energy_unit}")
         self.measure_spin = measure_spin  # Flag for measuring spin expectation values
         self.temp_values = np.logspace(np.log(temp_min)/np.log(10), np.log(temp_max)/np.log(10), num_temps)  # Default temperature range
 
@@ -275,7 +293,10 @@ class NLCExpansion:
         if pt is None:
             raise ValueError(
                 f"cluster {cluster_id}: neither eigenvalues nor P(T) available")
-        Tc = np.asarray(pt['temperatures'], dtype=float)
+        # energy_unit=meV: the stored P(T) was computed with T on the
+        # COUPLING (meV) scale -- rescale its temperature axis AND its
+        # energy values by 1/kB; Cv and S are dimensionless, unchanged.
+        Tc = np.asarray(pt['temperatures'], dtype=float) * self.e_scale
         # np.interp clamps (constant-extrapolates) outside the stored grid;
         # silently doing that produces flat, wrong P(T) tails if the
         # summation was invoked with a wider temp range than the ED step.
@@ -292,7 +313,8 @@ class NLCExpansion:
         def _itp(y):
             return np.interp(self.temp_values, Tc[order],
                              np.asarray(y, dtype=float)[order])
-        e = _itp(pt['energy']); c = _itp(pt['specific_heat']); s = _itp(pt['entropy'])
+        e = _itp(pt['energy']) * self.e_scale
+        c = _itp(pt['specific_heat']); s = _itp(pt['entropy'])
         if self.SI:
             R = 6.02214076e23 * 1.380649e-23
             e, c, s = e * R, c * R, s * R
@@ -308,7 +330,7 @@ class NLCExpansion:
         pt = self.clusters[cluster_id].get('thermo_pt')
         if pt is None or 'std_error_specific_heat' not in pt:
             return None
-        Tc = np.asarray(pt['temperatures'], dtype=float)
+        Tc = np.asarray(pt['temperatures'], dtype=float) * self.e_scale
         order = np.argsort(Tc)
         out = {}
         for prop in ('energy', 'specific_heat', 'entropy'):
@@ -317,6 +339,8 @@ class NLCExpansion:
                 return None
             err = np.interp(self.temp_values, Tc[order],
                             np.asarray(pt[key], dtype=float)[order])
+            if prop == 'energy':
+                err = err * self.e_scale
             if self.SI:
                 err = err * (6.02214076e23 * 1.380649e-23)
             out[prop] = err
@@ -330,6 +354,10 @@ class NLCExpansion:
         Returns:
             Dictionary with 'energy', 'specific_heat', and 'entropy' as keys
         """
+        # energy_unit=meV: scale eigenvalues onto the Kelvin grid (1.0 for
+        # the default dimensionless/K convention -- see __init__).
+        if self.e_scale != 1.0:
+            eigenvalues = np.asarray(eigenvalues, dtype=float) * self.e_scale
         ground_state_energy = np.min(eigenvalues)
         shifted = eigenvalues - ground_state_energy
 
@@ -1654,6 +1682,15 @@ if __name__ == "__main__":
     parser.add_argument('--order_cutoff', type=int, help='Maximum order to include in summation')
     parser.add_argument('--plot', action='store_true', help='Generate plot of results')
     parser.add_argument('--SI_units', action='store_true', help='Use SI units for output')
+    parser.add_argument('--energy_unit', type=str, default='dimensionless',
+                        choices=['dimensionless', 'K', 'meV'],
+                        help='Unit of the ED energies relative to the temperature '
+                             'grid. Default (dimensionless / K): kB=1, T and E on '
+                             'the same scale -- no conversion (the historical '
+                             'behaviour). meV: couplings were written in meV and '
+                             'the temperature grid is in KELVIN -> all energies '
+                             '(eigenvalues, stored P(T) curves and their grids) '
+                             'are multiplied by 1/kB = 11.6045 K/meV.')
     parser.add_argument('--temp_min', type=float, default=1e-4, help='Minimum temperature for calculations')
     parser.add_argument('--temp_max', type=float, default=1.0, help='Maximum temperature for calculations')
     parser.add_argument('--temp_bins', type=int, default=200, help='Number of temperature points to calculate')
@@ -1669,7 +1706,8 @@ if __name__ == "__main__":
     os.makedirs(args.output_dir, exist_ok=True)
     
     # Create NLC instance
-    nlc = NLCExpansion(args.cluster_dir, args.eigenvalue_dir, args.temp_min, args.temp_max, args.temp_bins, args.measure_spin, args.SI_units)
+    nlc = NLCExpansion(args.cluster_dir, args.eigenvalue_dir, args.temp_min, args.temp_max, args.temp_bins, args.measure_spin, args.SI_units,
+                       energy_unit=args.energy_unit)
     
     # Handle backward compatibility for euler_resum flag
     resummation_method = args.resummation_method
