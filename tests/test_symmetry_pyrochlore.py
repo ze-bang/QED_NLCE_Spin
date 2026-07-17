@@ -36,7 +36,7 @@ from qed_nlce.prep.generate_pyrochlore_clusters import (
     generate_clusters,
 )
 from qed_nlce.ed.operator import SpinHalfOperator, OP_SP, OP_SM, OP_SZ
-from qed_nlce.ed.dense import solve_spectrum, _eigh_block
+from oracle.dense import solve_spectrum, _eigh_block
 
 
 def _build_xxz_op(cluster_tets, tetrahedra, Jxx=1.0, Jzz=1.4):

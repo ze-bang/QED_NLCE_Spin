@@ -1,10 +1,12 @@
-"""Block-aware exact-tier routing (_exact_tier_feasible).
+"""Block-aware exact-tier routing (qed_nlce.ed.engine.plan_exact_solve).
 
 Deep NLCE orders are noise-dominated under any stochastic solver (the
 weight cancellation ~ (J/T)^n meets a flat ~1e-3 sample error), so the
 router must send every cluster that CAN be solved exactly to the exact
 tier -- gated by the largest symmetry block and available RAM, not the
-raw Hilbert dimension.
+raw Hilbert dimension. The plan and the solver consume the SAME
+resolved ClusterSymmetry, and a borderline Burnside estimate is refined
+by the engine's actual plan_only star plan.
 """
 from __future__ import annotations
 
@@ -16,9 +18,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from qed_nlce.core import dense_ed
-from qed_nlce.core.ed_runner import EDOptions
-from qed_nlce.ed import OP_SM, OP_SP, OP_SZ, SpinHalfOperator
+pytest.importorskip("qed", reason="qed C++ package not installed")
+
+from qed_nlce.ed import (  # noqa: E402
+    OP_SM, OP_SP, OP_SZ, SpinHalfOperator, spinhalf_to_qed,
+)
+from qed_nlce.ed import engine  # noqa: E402
+from qed_nlce.core.ed_runner import EDOptions  # noqa: E402
 
 
 def _xxz_chain(n, reflection=True):
@@ -35,7 +41,7 @@ def _xxz_chain(n, reflection=True):
 
 
 def _sz_broken_chain(n):
-    """S+S+ pair terms: breaks U(1), keeps time reversal."""
+    """S+S+ pair terms: breaks U(1), keeps parity + time reversal."""
     op = _xxz_chain(n)
     for i in range(n - 1):
         op.add_two(OP_SP, i, OP_SP, i + 1, 0.3)
@@ -43,35 +49,48 @@ def _sz_broken_chain(n):
     return op
 
 
+def _plan(op, n, options=None):
+    qop = spinhalf_to_qed(op)
+    cs = engine.resolve_cluster_symmetry(qop)
+    return cs, engine.plan_exact_solve(qop, cs, options or EDOptions(),
+                                       log_tag="t")
+
+
 @pytest.fixture
 def big_ram(monkeypatch):
-    monkeypatch.setattr(dense_ed, "_mem_available_bytes", lambda: 120 << 30)
+    monkeypatch.setattr(engine, "_mem_available_bytes", lambda: 120 << 30)
 
 
 @pytest.fixture
 def tiny_ram(monkeypatch):
-    monkeypatch.setattr(dense_ed, "_mem_available_bytes", lambda: 2 << 30)
+    monkeypatch.setattr(engine, "_mem_available_bytes", lambda: 2 << 30)
 
 
 def test_19site_xxz_with_reflection_routes_exact(big_ram):
-    """The order-6 pyrochlore regime: 2^19 raw, but C(19,9)/2 ~ 46k real."""
-    op = _xxz_chain(19)
-    assert dense_ed._exact_tier_feasible(op, 19, EDOptions(), "t")
+    """The order-6 pyrochlore regime: 2^19 raw, but C(19,9)/2 ~ 46k real.
+    The 46k estimate is within 4x of the 120k cap, so this also
+    exercises the plan_only refinement (block_exact)."""
+    cs, plan = _plan(_xxz_chain(19), 19)
+    assert cs.sz_conserved and cs.time_reversal
+    assert plan.feasible
+    assert plan.block_exact, "borderline estimate must be plan-refined"
+    assert plan.max_block <= 120_000
 
 
 def test_19site_szbroken_routes_oftlm(big_ram):
     """Sz broken at N=19: even with parity, 2^18-per-parity blocks are
     beyond the block cap for a low-symmetry cluster."""
-    op = _sz_broken_chain(19)
-    assert not dense_ed._exact_tier_feasible(op, 19, EDOptions(), "t")
+    _cs, plan = _plan(_sz_broken_chain(19), 19)
+    assert not plan.feasible
 
 
 def test_17site_parity_conserving_routes_exact(big_ram):
     """Triangle-based order-8 anisotropic regime (Jzpm=0): Sz broken but
     parity conserved -> 2^17/2 = 65536-per-parity blocks, dense-feasible."""
-    op = _sz_broken_chain(17)
-    assert op.conserves_sz_parity() and not op.conserves_sz()
-    assert dense_ed._exact_tier_feasible(op, 17, EDOptions(), "t")
+    cs, plan = _plan(_sz_broken_chain(17), 17)
+    assert cs.sz_parity and not cs.sz_conserved
+    assert plan.sector == (1 << 17) // 2
+    assert plan.feasible
 
 
 def test_17site_parity_broken_routes_oftlm(big_ram):
@@ -80,49 +99,54 @@ def test_17site_parity_broken_routes_oftlm(big_ram):
     op = _sz_broken_chain(17)
     op.add_single(OP_SP, 3, 0.21)
     op.add_single(OP_SM, 3, 0.21)
-    assert not op.conserves_sz_parity()
-    assert not dense_ed._exact_tier_feasible(op, 17, EDOptions(), "t")
+    cs, plan = _plan(op, 17)
+    assert not cs.sz_parity and not cs.sz_conserved
+    assert not plan.feasible
 
 
 def test_22site_xxz_routes_oftlm(big_ram):
-    """Order-7 pyrochlore regime: C(22,11)=705k blows the block cap."""
-    op = _xxz_chain(22)
-    assert not dense_ed._exact_tier_feasible(op, 22, EDOptions(), "t")
+    """Order-7 pyrochlore regime on a LOW-symmetry cluster:
+    C(22,11)/2 = 352k blows the 120k block cap. The over-limit Burnside
+    estimate is a certain rejection (max >= average), so the plan must
+    NOT pay for a plan_only refinement here."""
+    _cs, plan = _plan(_xxz_chain(22), 22)
+    assert not plan.feasible
+    assert not plan.block_exact
 
 
 def test_sector_cap_rejects_symmetric_order7(big_ram):
-    """Even a HIGH-symmetry 22-site cluster (small blocks) must be
-    rejected: the streaming lane's serial basis construction scales with
-    the raw C(22,11)=705k sector (measured 6.5 h+ vs 147 s at 92k), so
-    tiny blocks do not make the solve fast. Simulate by lifting the
-    block cap and confirming the sector cap still gates."""
-    op = _xxz_chain(22)
-    lifted = EDOptions(exact_max_block=10_000_000)
-    assert not dense_ed._exact_tier_feasible(op, 22, lifted, "t")
-    # Control: the same lifted-block config accepts an order-6-scale
-    # sector (C(19,9) = 92k < 200k), proving the rejection above came
-    # from the sector cap, not the block cap.
-    assert dense_ed._exact_tier_feasible(_xxz_chain(19), 19, lifted, "t")
+    """Even with the block cap lifted, the raw-sector cap still gates
+    (its default 800k admits order 7 = C(22,11) = 705432 but nothing
+    larger); and the same lifted config accepts an order-6-scale
+    sector, proving which cap fired."""
+    lifted = EDOptions(exact_max_block=10_000_000,
+                       exact_max_sector=500_000)
+    _cs, plan = _plan(_xxz_chain(22), 22, lifted)
+    assert plan.sector == comb(22, 11)
+    assert not plan.feasible
+    _cs, plan = _plan(_xxz_chain(19), 19, lifted)
+    assert plan.feasible
 
 
 def test_ram_guard_blocks_exact(tiny_ram):
     """Same 19-site cluster must fall back to OFTLM on a small machine."""
-    op = _xxz_chain(19)
-    assert not dense_ed._exact_tier_feasible(op, 19, EDOptions(), "t")
+    _cs, plan = _plan(_xxz_chain(19), 19)
+    assert not plan.feasible
 
 
 def test_exact_max_block_knob(big_ram):
-    op = _xxz_chain(19)
-    small = EDOptions(exact_max_block=1000)
-    assert not dense_ed._exact_tier_feasible(op, 19, small, "t")
+    _cs, plan = _plan(_xxz_chain(19), 19, EDOptions(exact_max_block=1000))
+    assert not plan.feasible
+    # certain rejection: estimate 46k >> 1k cap, no plan_only spent
+    assert not plan.block_exact
 
 
-def test_block_estimate_matches_sector_over_aut(big_ram):
-    """Sanity on the estimate itself for the reflection chain."""
+def test_resolved_symmetry_matches_expectations(big_ram):
+    """Sanity on the single detection point for the reflection chain."""
     op = _xxz_chain(19)
-    # reflection => |Aut| = 2, Sz conserved, TR real
-    from qed_nlce.ed.symmetry import detect_time_reversal, find_automorphisms
-    assert len(find_automorphisms(op)) == 2
-    assert op.conserves_sz()
-    assert detect_time_reversal(op)
+    qop = spinhalf_to_qed(op)
+    cs = engine.resolve_cluster_symmetry(qop)
+    # reflection => |A| = 2, Sz conserved, TR real
+    assert cs.abelian_size == 2
+    assert cs.sz_conserved and cs.time_reversal
     assert comb(19, 9) // 2 == 46189

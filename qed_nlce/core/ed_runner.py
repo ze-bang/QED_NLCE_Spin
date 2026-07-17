@@ -65,4 +65,10 @@ class EDOptions:
     # 200k -> 800k to admit order 7; order 8 (C(25,12)=5.2M) still excluded.
     exact_max_sector: int = 800_000
     device: str = "cpu"                  # qed.full_spectrum backend device
+    # qed point-group routing for the exact tier: "auto" (default)
+    # projects through the factorized little-group lane where it accepts
+    # and falls back to the abelian rep lane with star/TR/flip folds;
+    # "off" keeps the abelian lane; "full" requires projection (raises
+    # with the decline reason). Forwarded to qed.full_spectrum.
+    point_group: str = "auto"
     extra_flags: list[str] = field(default_factory=list)

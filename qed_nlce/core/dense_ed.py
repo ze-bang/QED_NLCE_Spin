@@ -1,17 +1,21 @@
 """Exact-diagonalization backend for the NLCE workflow.
 
-Runs a single cluster's ED in-process using :mod:`qed_nlce.ed`, in one
-of two tiers:
+Runs a single cluster's ED in-process, entirely on the QED library via
+:mod:`qed_nlce.ed.engine`:
 
-  * read the per-cluster Hamiltonian (``Trans.dat`` / ``InterAll.dat``),
-  * below ``options.oftlm_cutoff`` (raw Hilbert dim): full EXACT
-    diagonalization via :func:`qed_nlce.ed.qed_bridge.full_spectrum_qed`,
-    which dispatches to ``qed.full_spectrum`` -- U(1) S^z, spatial
-    automorphisms (abelian AND non-abelian, via QED's symmetry-adapted
-    basis engine), spin-flip Z2, and time-reversal reduction, all
-    verified to reproduce the brute-force spectrum
-    (``tests/test_qed_bridge_parity.py``);
-  * above it: matrix-free OFTLM (:func:`qed_nlce.ed.oftlm_thermodynamics`),
+  * read the per-cluster Hamiltonian (``Trans.dat`` / ``InterAll.dat``)
+    directly into a native ``qed`` operator
+    (:func:`qed_nlce.ed.io.read_qed_operator` -- no Python middleman),
+  * resolve the cluster's symmetry ONCE
+    (:func:`~qed_nlce.ed.engine.resolve_cluster_symmetry`: spatial
+    GeneratorSet with the non-abelian residue, U(1)-Sz / native
+    Sz-parity / spin-flip / time-reversal flags),
+  * below ``options.oftlm_cutoff`` (raw Hilbert dim) -- or whenever the
+    block-aware plan (:func:`~qed_nlce.ed.engine.plan_exact_solve`)
+    says the largest symmetry block fits this machine -- full EXACT
+    diagonalization via :func:`~qed_nlce.ed.engine.full_spectrum`
+    (one ``qed.full_spectrum`` call carrying ALL of that symmetry);
+  * otherwise: matrix-free OFTLM (:func:`qed_nlce.ed.oftlm_thermodynamics`),
     producing per-cluster thermodynamics directly (no eigenvalue
     spectrum) for clusters too large to diagonalize exactly even with
     full symmetry reduction.
@@ -24,9 +28,8 @@ for OFTLM). Writes are atomic (temp file + ``os.replace``) so a crash
 mid-write can never leave a truncated file that the summation kernel
 would silently treat as valid.
 
-The pure-Python solver in :mod:`qed_nlce.ed.dense` / ``.symmetry`` is
-no longer on this runtime path; it remains as the correctness oracle
-for the parity test and existing unit tests.
+The pure-Python solver (``tests/oracle/``) is not on any runtime path;
+it remains the correctness oracle for the parity suite.
 """
 
 from __future__ import annotations
@@ -46,8 +49,9 @@ except ImportError:  # pragma: no cover
     _HAS_H5PY = False
 
 from ..ed import thermodynamics, oftlm_thermodynamics
-from ..ed.qed_bridge import full_spectrum_qed
-from ..ed.io import read_operator
+from ..ed.engine import (full_spectrum, plan_exact_solve,
+                         resolve_cluster_symmetry)
+from ..ed.io import read_qed_operator
 from .ed_runner import EDOptions
 
 __all__ = ["can_run_in_process", "run_ed_in_process", "assert_qed_available"]
@@ -67,7 +71,7 @@ def assert_qed_available() -> None:
     except ImportError as exc:
         raise ImportError(
             "The 'qed' C++ package is required for the QED_NLCE exact-ED "
-            "and OFTLM backends (qed_nlce.ed.qed_bridge / qed_nlce.ed.oftlm). "
+            "and OFTLM backends (qed_nlce.ed.engine / qed_nlce.ed.oftlm). "
             "Install it (see the sibling QED repo) before running any "
             "pipeline -- failing now rather than after cluster work has "
             f"already run. Original error: {exc}"
@@ -77,98 +81,6 @@ def assert_qed_available() -> None:
 def can_run_in_process(method: str) -> bool:  # noqa: ARG001 - dense only
     """Every supported method is plain dense diagonalization."""
     return True
-
-
-def _mem_available_bytes() -> int:
-    try:
-        with open("/proc/meminfo") as f:
-            for line in f:
-                if line.startswith("MemAvailable:"):
-                    return int(line.split()[1]) * 1024
-    except OSError:
-        pass
-    return 8 << 30  # conservative fallback
-
-
-def _exact_tier_feasible(op, num_sites: int, options: EDOptions,
-                         log_tag: str) -> bool:
-    """Block-aware feasibility of the EXACT full-spectrum tier.
-
-    The raw Hilbert dimension is the wrong gate: what the dense
-    eigensolver actually faces is the largest SYMMETRY BLOCK --
-    C(N, N/2) for Sz-conserving models (2^N otherwise), divided by the
-    spatial automorphism group, in real arithmetic when time reversal
-    holds. A 19-site XXZ tree (2^19 raw) with a reflection is a
-    46k-dim real block (~17 GB, very solvable); a 19-site Sz-broken
-    cluster is not. Deep NLCE orders are noise-dominated under any
-    stochastic solver (weight cancellation ~ (J/T)^n vs flat ~1e-3
-    sample error), so every cluster that CAN be exact MUST be -- this
-    predicate pushes the exact tier to the true hardware limit instead
-    of a fixed 2^N.
-    """
-    from math import comb
-
-    from ..ed.symmetry import (build_symmetry_group, detect_time_reversal)
-
-    n = int(num_sites)
-    if op.conserves_sz():
-        sector = comb(n, n // 2)
-    elif op.conserves_sz_parity():
-        # Sz broken but every term shifts Sz by an even amount (e.g.
-        # S+S+ pair terms with Jzpm = 0): up-spin parity halves the
-        # space; qed blocks by it natively since the 2026-07-04 drop.
-        sector = (1 << n) // 2
-    else:
-        sector = 1 << n
-    # The reduction qed's default full-spectrum lane actually applies is
-    # the maximal ABELIAN subgroup (momentum blocks), not the full
-    # automorphism group -- pyrochlore tree clusters have |Aut| ~ 10^3
-    # but abelian cliques ~ 10^2, an ~8x difference that matters exactly
-    # at the order-7/8 feasibility edge. Use the same greedy construction
-    # the bridge hands to qed.
-    group, _ = build_symmetry_group(op, use_spin_flip=False)
-    n_ab = max(1, group.size)
-    block = max(1, sector // n_ab)  # Burnside-average block estimate
-    is_real = detect_time_reversal(op)
-    # qed C++ engine everywhere (it now blocks by Sz-parity natively for
-    # U(1)-broken models): builds each block in its final dtype, in place.
-    bytes_per = (8 if is_real else 16) * 1.25
-    need = block * block * bytes_per
-    avail = _mem_available_bytes()
-    limit = int(getattr(options, "exact_max_block", 120_000))
-    # Second axis: the order-7 dense-assembly wall (traced 2026-07-05).
-    # full_spectrum builds a DENSE H_Gamma per (Sz, irrep) block. The
-    # historical cliff: sectors whose orbit-CSR exceeded qed's 64 MiB lazy
-    # budget went rep-only and fell back to a SERIAL column-by-column
-    # build (lanczos.cpp `for j: col_j = H*e_j`), which at large |G|
-    # collapsed to ~1 core for hours (C(22,11)=705k ran 6.5 h+).
-    #
-    # >>> SEAM CLOSED (2026-07-06). Upstream QED commit 6699a42 ("Retire
-    #     the full_spectrum dense-block cliff") added the rep-walk dense
-    #     assembler: rep-lazy sectors assemble via
-    #     build_reduced_symmetry_csr_rep in ONE O(|G|*nnz) PARALLEL pass,
-    #     no orbit-CSR materialization, streaming through thousands of tiny
-    #     blocks with flat memory and no serial column crawl.
-    #     scripts/verify_order7_exact.py timed a 22-site order-7 pyrochlore
-    #     cluster (raw Sz sector C(22,11)=705432) end to end on a cluster
-    #     node: the COMPLETE 2^22 = 4,194,304 eigenvalue spectrum in 3.65 h
-    #     (E0=-7.487, count exact). The exact tier is confirmed feasible
-    #     through order 7, so the cap is raised 200k -> 800k (default in
-    #     EDOptions.exact_max_sector / --exact_max_sector), admitting
-    #     order-7 clusters to exact ED instead of OFTLM. Order 8
-    #     (C(25,12)=5.2M) stays excluded pending its own timing.
-    sector_limit = int(getattr(options, "exact_max_sector", 800_000))
-    ok = block <= limit and sector <= sector_limit and need <= 0.8 * avail
-    logging.info(
-        "[%s] exact-tier feasibility: N=%d sz_conserved=%s sector=%s "
-        "|G_abelian|=%d block~%s %s need~%.1f GB avail~%.1f GB "
-        "exact_max_block=%d -> %s",
-        log_tag, n, op.conserves_sz(), f"{sector:,}", n_ab, f"{block:,}",
-        "real" if is_real else "complex",
-        need / 2**30, avail / 2**30, limit,
-        "EXACT" if ok else "OFTLM",
-    )
-    return ok
 
 
 def _temperature_grid(options: EDOptions) -> np.ndarray:
@@ -315,25 +227,24 @@ def run_ed_in_process(
     os.makedirs(out_subdir, exist_ok=True)
 
     try:
-        op = read_operator(ham_subdir, int(num_sites))
+        qop = read_qed_operator(ham_subdir, int(num_sites))
         hilbert_dim = 1 << int(num_sites)
         cutoff = int(getattr(options, "oftlm_cutoff", 1 << 15))
+        # ONE symmetry resolution per cluster: the same ClusterSymmetry
+        # feeds the feasibility plan AND the solve, so the router can no
+        # longer disagree with what qed does at solve time.
+        cs = resolve_cluster_symmetry(qop)
         # Exact whenever possible: below the raw cutoff always; above it,
-        # whenever the block-aware feasibility check says the largest
-        # symmetry block fits this machine. NLCE weight cancellation makes
-        # stochastic solvers unusable at deep orders, so OFTLM is strictly
-        # a last resort.
-        if hilbert_dim <= cutoff or _exact_tier_feasible(
-                op, int(num_sites), options, log_tag):
-            # Exact tier: qed.full_spectrum for everything. Since the
-            # 2026-07-04 upstream drop, qed natively blocks by Sz-PARITY
-            # for U(1)-broken models (parity-half sectors on the rep
-            # lanes, CPU+GPU) in addition to U(1)-Sz, spatial (abelian +
-            # non-abelian little-group), spin-flip, and time-reversal --
-            # the Python parity engine is retired from the runtime path
-            # (it remains the test oracle).
-            evals = full_spectrum_qed(
-                op, device=getattr(options, "device", "cpu"),
+        # whenever the block-aware plan says the largest symmetry block
+        # fits this machine. NLCE weight cancellation makes stochastic
+        # solvers unusable at deep orders, so OFTLM is strictly a last
+        # resort.
+        if hilbert_dim <= cutoff or plan_exact_solve(
+                qop, cs, options, log_tag=log_tag).feasible:
+            evals = full_spectrum(
+                qop, cs,
+                device=getattr(options, "device", "cpu"),
+                point_group=str(getattr(options, "point_group", "auto")),
                 log_tag=log_tag,
             )
             _write_results(out_subdir, evals, int(num_sites), options)
@@ -347,13 +258,18 @@ def run_ed_in_process(
             # same-dimension clusters identical random vectors, making
             # their stochastic errors correlated -- those add coherently
             # in the per-order NLCE sum instead of averaging out.
+            # (repr-keyed sort: term tuples end in a complex coefficient,
+            # which is not orderable when the leading fields tie.)
             import zlib
-            term_sig = (repr(sorted(op.single)) + repr(sorted(op.two))).encode()
+            term_sig = (
+                repr(sorted(qop.iter_one_body_terms(), key=repr))
+                + repr(sorted(qop.iter_two_body_terms(), key=repr))
+            ).encode()
             seed = (zlib.crc32(term_sig)
                     ^ (int(num_sites) << 16)) & 0x7FFFFFFF or 1
             T = _temperature_grid(options)
             res = oftlm_thermodynamics(
-                op, T,
+                qop, T,
                 num_exact=int(getattr(options, "oftlm_num_exact", 16)),
                 num_samples=int(getattr(options, "oftlm_num_samples", 20)),
                 krylov_dim=int(getattr(options, "oftlm_krylov_dim", 100)),

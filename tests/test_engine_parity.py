@@ -1,10 +1,12 @@
-"""Parity check: qed.full_spectrum (Phase 1 runtime path) must reproduce
-the pure-Python solve_spectrum oracle to machine precision.
+"""Parity check: the qed engine (the ONLY runtime dense-ED path) must
+reproduce the pure-Python oracle (tests/oracle) to machine precision.
 
-This is the regression guard for routing the dense-ED tier through
-QED's C++ symmetry engine instead of the homegrown Python solver. If
-this test ever fails, do NOT trust any NLCE numbers produced via
-``qed_nlce.ed.qed_bridge.full_spectrum_qed`` until it's fixed.
+This is the regression guard for the dense-ED tier living entirely on
+QED's C++ symmetry engine (qed_nlce.ed.engine.full_spectrum: U(1)-Sz /
+native Sz-parity, spatial abelian + non-abelian little-group projection
+via the GeneratorSet's star_perms residue, spin-flip transport, time
+reversal). If this test ever fails, do NOT trust any NLCE numbers until
+it's fixed.
 """
 from __future__ import annotations
 
@@ -21,8 +23,9 @@ if str(REPO_DIR) not in sys.path:
 
 pytest.importorskip("qed", reason="qed C++ package not installed")
 
-from qed_nlce.ed import OP_SM, OP_SP, OP_SZ, SpinHalfOperator, solve_spectrum
-from qed_nlce.ed.qed_bridge import full_spectrum_qed
+from qed_nlce.ed import OP_SM, OP_SP, OP_SZ, SpinHalfOperator, spinhalf_to_qed
+from qed_nlce.ed.engine import full_spectrum, resolve_cluster_symmetry
+from oracle.dense import solve_spectrum
 from qed_nlce.prep.generate_pyrochlore_clusters import (
     build_tetrahedron_graph,
     create_pyrochlore_lattice,
@@ -69,9 +72,15 @@ def _build_xxz_pyrochlore_op(cluster_tets, tetrahedra, Jxx=1.0, Jzz=1.4):
     return op, len(sites)
 
 
+def _run_engine(op: SpinHalfOperator):
+    qop = spinhalf_to_qed(op)
+    cs = resolve_cluster_symmetry(qop)
+    return cs, np.sort(full_spectrum(qop, cs))
+
+
 def _assert_parity(op: SpinHalfOperator) -> None:
     ref = np.sort(solve_spectrum(op, use_symmetry=True))
-    test = np.sort(full_spectrum_qed(op))
+    _cs, test = _run_engine(op)
     assert ref.shape == test.shape
     np.testing.assert_allclose(ref, test, atol=1e-8, rtol=0)
 
@@ -121,10 +130,34 @@ def test_pyrochlore_order4_parity(pyro_clusters):
     _assert_parity(op)
 
 
+def test_high_aut_projection_lane_parity():
+    """|Aut| far past the clique budget: a star graph K_{1,9} has
+    |Aut| = 9! = 362880. find_symmetries must return promptly (greedy
+    budget branch), carry a non-empty star_perms residue, the projection
+    lane must ENGAGE on it, and the spectrum must match the oracle --
+    this replaces the retired raw-generator-list workaround, which
+    discarded the residue on exactly these clusters."""
+    from qed.point_group_routing import resolve_projection_lane
+
+    n = 10
+    op = SpinHalfOperator(n)
+    for leaf in range(1, n):
+        op.add_two(OP_SZ, 0, OP_SZ, leaf, 1.0)
+        op.add_two(OP_SP, 0, OP_SM, leaf, 0.5)
+        op.add_two(OP_SM, 0, OP_SP, leaf, 0.5)
+    ref = np.sort(solve_spectrum(op, use_symmetry=True))
+    cs, test = _run_engine(op)
+    assert cs.gens is not None and cs.num_star_perms > 0
+    lane = resolve_projection_lane(cs.gens, point_group="auto",
+                                   consumer="full_spectrum",
+                                   eigenvalues_only=True)
+    assert lane.mode == "project"
+    np.testing.assert_allclose(ref, test, atol=1e-8, rtol=0)
+
+
 @pytest.mark.slow
-def test_explicit_generators_path_parity_n16():
-    """N >= 16 routes through the explicit-abelian-generators path
-    (qed's symmetry='auto' max-clique search hangs on the huge
-    automorphism groups of pyrochlore clusters). Pin its correctness
-    against the Python oracle on a 16-site ring."""
+def test_ring16_parity():
+    """16-site ring (dihedral group, momentum sectors): the largest
+    fixture in the suite; pins the engine at a size where every
+    reduction (Sz, momentum, flip transport, TR) is active."""
     _assert_parity(_heisenberg_ring(16))

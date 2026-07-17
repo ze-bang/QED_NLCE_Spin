@@ -27,7 +27,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from qed_nlce.ed import solve_spectrum
+from oracle.dense import solve_spectrum
 from qed_nlce.hamiltonians.cluster import ClusterData
 from qed_nlce.hamiltonians.triangular import build_triangular_operator
 from qed_nlce.prep.generate_triangular_clusters import (

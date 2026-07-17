@@ -36,7 +36,7 @@ from typing import Optional
 
 import numpy as np
 
-from .operator import SpinHalfOperator
+from qed_nlce.ed.operator import SpinHalfOperator
 
 __all__ = [
     "find_automorphisms",

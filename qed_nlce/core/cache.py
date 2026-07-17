@@ -278,6 +278,14 @@ class EigenvalueCacheKey:
     # Content hashes of the inputs.
     cluster_graph_hash: str
     hamiltonian_content_hash: str
+    # Engine-policy stamp: bumped whenever the symmetry/routing policy
+    # changes what a "cached result" means (e.g. the qed-engine rewrite:
+    # GeneratorSet-with-residue projection, plan_only routing, native
+    # C++ operator ingestion, new OFTLM seed derivation). Adding these
+    # fields changes every digest -> ONE loud full invalidation instead
+    # of silently replaying results computed under the old policy.
+    ed_engine: str = "qed-engine-v2"
+    point_group: str = "auto"
 
     def digest(self) -> str:
         payload = json.dumps(asdict(self), sort_keys=True).encode("utf-8")
@@ -392,6 +400,7 @@ class EigenvalueCache:
             device=str(getattr(options, "device", "cpu")),
             cluster_graph_hash=graph_hash,
             hamiltonian_content_hash=ham_hash,
+            point_group=str(getattr(options, "point_group", "auto")),
         )
 
     # ----- on-disk layout -----

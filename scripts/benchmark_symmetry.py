@@ -36,8 +36,12 @@ from qed_nlce.ed import (  # noqa: E402
     OP_SP,
     OP_SZ,
     SpinHalfOperator,
-    solve_spectrum,
 )
+
+# The pure-Python solver this benchmark times is the TEST ORACLE now
+# (tests/oracle); the runtime path is qed_nlce.ed.engine.
+sys.path.insert(0, str(REPO_DIR / "tests"))
+from oracle.dense import solve_spectrum  # noqa: E402
 
 
 def heisenberg_ring(n: int, jz: float = 1.0) -> SpinHalfOperator:

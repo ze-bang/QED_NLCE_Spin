@@ -24,8 +24,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from qed_nlce.ed.operator import SpinHalfOperator, OP_SP, OP_SM, OP_SZ
-from qed_nlce.ed.symmetry import detect_spin_flip, detect_time_reversal
-from qed_nlce.ed.dense import solve_spectrum
+from oracle.symmetry import detect_spin_flip, detect_time_reversal
+from oracle.dense import solve_spectrum
 
 
 def _complex_pair_chain(n: int) -> SpinHalfOperator:

@@ -56,7 +56,7 @@ def _oftlm_single(qop, T: np.ndarray, num_exact: int, num_samples: int,
 
 
 def oftlm_thermodynamics(
-    op: SpinHalfOperator,
+    op,
     temperatures: np.ndarray,
     *,
     num_exact: int = 8,
@@ -80,7 +80,9 @@ def oftlm_thermodynamics(
     013186 quantify FTLM accuracy via R-scaling).
     """
     T = np.asarray(temperatures, dtype=np.float64)
-    qop = spinhalf_to_qed(op)
+    # Runtime callers hand a native qed Operator directly (no middleman);
+    # the oracle/test path may still pass a SpinHalfOperator.
+    qop = spinhalf_to_qed(op) if isinstance(op, SpinHalfOperator) else op
 
     num_seeds = max(1, int(num_seeds))
     per_seed = max(1, int(num_samples) // num_seeds)

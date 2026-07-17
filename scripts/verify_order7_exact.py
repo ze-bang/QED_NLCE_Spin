@@ -23,7 +23,7 @@ sector cap so order-7 clusters go exact instead of to OFTLM:
     qed-nlce ... --exact_max_sector 800000     # > C(22,11)=705432
 
 and record the measured time in
-qed_nlce/core/dense_ed._exact_tier_feasible's OPEN SEAM comment.
+the (since closed) order-7 exact seam in the router.
 
 Usage
 -----
@@ -84,18 +84,22 @@ def main() -> None:
     if not args.quiet:
         logging.basicConfig(level=logging.INFO)
 
-    from qed_nlce.ed.qed_bridge import full_spectrum_qed
-    from qed_nlce.core.dense_ed import _exact_tier_feasible
+    from qed_nlce.ed import spinhalf_to_qed
+    from qed_nlce.ed.engine import (full_spectrum, plan_exact_solve,
+                                    resolve_cluster_symmetry)
     from qed_nlce.core.ed_runner import EDOptions
 
     op, n = build_cluster_op(args.order, args.topology)
     print(f"order-{args.order} topology {args.topology}: N={n} sites, "
           f"Hilbert 2^{n}={1 << n:,}", flush=True)
-    print(f"router (default cap) admits exact? "
-          f"{_exact_tier_feasible(op, n, EDOptions(), 'verify')}", flush=True)
+    qop = spinhalf_to_qed(op)
+    cs = resolve_cluster_symmetry(qop)
+    plan = plan_exact_solve(qop, cs, EDOptions(), log_tag="verify")
+    print(f"router (default cap) admits exact? {plan.feasible} "
+          f"[{plan.reason}]", flush=True)
 
     t0 = time.time()
-    ev = full_spectrum_qed(op, device=args.device)
+    ev = full_spectrum(qop, cs, device=args.device, log_tag="verify")
     dt = time.time() - t0
 
     ok = ev.shape[0] == (1 << n)

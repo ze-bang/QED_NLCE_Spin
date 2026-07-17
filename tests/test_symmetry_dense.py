@@ -24,9 +24,9 @@ from qed_nlce.ed import (  # noqa: E402
     OP_SP,
     OP_SZ,
     SpinHalfOperator,
-    detect_spin_flip,
-    solve_spectrum,
 )
+from oracle.dense import solve_spectrum  # noqa: E402
+from oracle.symmetry import detect_spin_flip  # noqa: E402
 
 
 def _heisenberg_ring(n: int, jz: float = 1.0, h: float = 0.0) -> SpinHalfOperator:

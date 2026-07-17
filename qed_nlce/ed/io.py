@@ -24,7 +24,8 @@ import os
 
 from .operator import SpinHalfOperator
 
-__all__ = ["write_operator", "read_operator", "write_site_info"]
+__all__ = ["write_operator", "read_operator", "read_qed_operator",
+           "write_site_info"]
 
 _BANNER = (
     "===================\n"
@@ -89,6 +90,28 @@ def read_operator(ham_subdir: str, num_sites: int) -> SpinHalfOperator:
         op.add_two(o1, s1, o2, s2, complex(re, im))
 
     return op
+
+
+def read_qed_operator(ham_subdir: str, num_sites: int):
+    """Reconstruct a native ``qed._core.Operator`` from ``ham_subdir``.
+
+    The C++ loader parses the same mVMC-banner ``Trans.dat`` /
+    ``InterAll.dat`` files :func:`write_operator` emits, so the runtime ED
+    path needs no :class:`SpinHalfOperator` middleman (that class remains
+    for the geometry builders and the test oracle). Missing files are
+    tolerated exactly like :func:`read_operator` (a cluster may have no
+    single-site terms).
+    """
+    from qed._core import Operator
+
+    qop = Operator(int(num_sites), 0.5)
+    trans = os.path.join(ham_subdir, "Trans.dat")
+    inter = os.path.join(ham_subdir, "InterAll.dat")
+    if os.path.exists(trans):
+        qop.load_trans(trans)
+    if os.path.exists(inter):
+        qop.load_inter_all(inter)
+    return qop
 
 
 def write_site_info(

@@ -38,7 +38,7 @@ from typing import Optional
 import numpy as np
 import scipy.linalg as sla
 
-from .operator import SpinHalfOperator
+from qed_nlce.ed.operator import SpinHalfOperator
 from .symmetry import (
     AbelianGroup,
     act_state,

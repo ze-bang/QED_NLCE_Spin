@@ -94,6 +94,25 @@ class FullEDPipeline(Pipeline):
                             "4,194,304 = 2^22 eigenvalues, E0=-7.487). Order 8 "
                             "(C(25,12)=5.2M) stays excluded pending its own "
                             "timing.")
+        g.add_argument("--energy_unit", type=str, default="dimensionless",
+                       choices=["dimensionless", "K", "meV"],
+                       help="Unit of the Hamiltonian couplings relative to the "
+                            "summation temperature grid (forwarded to the "
+                            "summation kernels). Default: kB=1, no conversion. "
+                            "meV: energies are scaled by 1/kB = 11.6045 K/meV "
+                            "so a Kelvin temperature grid is dimensionally "
+                            "consistent.")
+        g.add_argument("--point_group", type=str, default="auto",
+                       choices=["auto", "off", "full"],
+                       help="qed point-group routing for the exact tier "
+                            "(default auto): 'auto' projects through the "
+                            "factorized little-group lane where it accepts "
+                            "(the resolved GeneratorSet carries the full "
+                            "non-abelian residue) and degrades to the abelian "
+                            "rep lane with star/TR/flip folds otherwise; "
+                            "'off' keeps the abelian lane; 'full' requires "
+                            "projection and raises with the decline reason. "
+                            "Part of the eigenvalue cache key.")
         g.add_argument("--oftlm_num_seeds", type=int, default=2,
                        help="OFTLM: number of independent seeds the sample "
                             "budget is split across (default 2). >= 2 yields "
@@ -141,6 +160,7 @@ class FullEDPipeline(Pipeline):
             exact_max_block=getattr(args, "exact_max_block", 120_000),
             exact_max_sector=getattr(args, "exact_max_sector", 800_000),
             device=getattr(args, "device", "cpu"),
+            point_group=getattr(args, "point_group", "auto"),
         )
 
     def needs_thermo(self, args: argparse.Namespace) -> bool:
@@ -190,6 +210,8 @@ class FullEDPipeline(Pipeline):
                 cmd.append("--measure_spin")
             if getattr(args, "SI_units", False):
                 cmd.append("--SI_units")
+            if getattr(args, "energy_unit", "dimensionless") != "dimensionless":
+                cmd.append(f"--energy_unit={args.energy_unit}")
             return cmd
 
         # default: pyrochlore (NLC_sum.py)
@@ -212,4 +234,6 @@ class FullEDPipeline(Pipeline):
             cmd.append(f"--order_cutoff={order_cutoff}")
         if getattr(args, "measure_spin", False):
             cmd.append("--measure_spin")
+        if getattr(args, "energy_unit", "dimensionless") != "dimensionless":
+            cmd.append(f"--energy_unit={args.energy_unit}")
         return cmd
