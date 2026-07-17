@@ -1,7 +1,7 @@
 """Concrete geometry implementations.
 
 Importing this subpackage triggers registration of every supported
-geometry (``pyrochlore``, ``triangular_site``, ``triangular_triangle``).
+geometry (``pyrochlore``, ``triangular_triangle``).
 After import, :func:`qed_nlce.core.list_geometries` reports them
 all, and :func:`qed_nlce.core.get_geometry` can instantiate any of
 them by name.
@@ -16,5 +16,4 @@ To add a new lattice:
 """
 
 from . import pyrochlore  # noqa: F401  -- registration side-effect
-from . import triangular_site  # noqa: F401
 from . import triangular_triangle  # noqa: F401

@@ -32,14 +32,14 @@ from collections import defaultdict
 
 import pynauty
 
-# Bond-color helpers. Import must work both as a package module
-# (qed_nlce.prep.generate_triangular_clusters) AND as a standalone
-# script (the NLCE workflow invokes this file via `python .../gen*.py`,
-# where relative imports have no parent package).
-try:
-    from . import _bond_color
-except ImportError:  # script execution: sys.path[0] is this directory
-    import _bond_color
+# TEST ORACLE ONLY (2026-07): the site-based expansion is DELETED from the
+# runtime package -- the triangle-based expansion (order = #triangles) is
+# the only NLCE path on the triangular lattice. This generator survives
+# here purely as the independent cross-check for the bond-colored
+# certificate machinery (tests/test_bond_colored_dedup.py): it is what
+# exposed both the anisotropic colored-dedup bug and the 3x per-site
+# normalization bug in the triangle generator.
+from qed_nlce.prep import _bond_color
 
 
 def extract_cluster_info(lattice, pos, cluster_nodes):

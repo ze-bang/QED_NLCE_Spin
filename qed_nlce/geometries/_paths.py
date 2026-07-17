@@ -25,7 +25,6 @@ REPO_ROOT = os.path.dirname(WORKFLOWS_DIR)
 PREP_DIR = os.path.join(NLCE_DIR, "prep")
 
 PYROCHLORE_GENERATOR = os.path.join(PREP_DIR, "generate_pyrochlore_clusters.py")
-TRIANGULAR_SITE_GENERATOR = os.path.join(PREP_DIR, "generate_triangular_clusters.py")
 TRIANGULAR_TRIANGLE_GENERATOR = os.path.join(
     PREP_DIR, "generate_triangle_nlce_clusters.py"
 )

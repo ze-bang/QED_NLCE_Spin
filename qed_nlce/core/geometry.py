@@ -54,7 +54,7 @@ class Geometry(ABC):
     default_temp_bins: ClassVar[int] = 100
 
     # Default order span. Each geometry's expansion order means a
-    # different thing (sites for triangular_site, triangles for
+    # different thing (triangles for
     # triangular_triangle, tetrahedra for pyrochlore), so the defaults
     # diverge.
     default_min_order: ClassVar[int] = 1

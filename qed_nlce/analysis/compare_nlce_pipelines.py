@@ -28,7 +28,7 @@ Output: eigenvalues for each cluster → compute thermodynamics → NLCE sum
 
 Step 2: Fit to Experimental Data
 ---------------------------------
-python qed_nlce/analysis/nlc_fit.py \\
+python qed_nlce/analysis/nlc_fit_triangular.py \\
     --exp_data_files experimental_cv.txt \\
     --max_order 4 \\
     --output_dir fit_results \\
@@ -110,7 +110,7 @@ KEY_DIFFERENCES = """
 ├─────────────────────┼─────────────────────┼─────────────────────────┤
 │ Scripts             │ nlce.py             │ nlce_ftlm.py            │
 │                     │ NLC_sum.py          │ NLC_sum_ftlm.py         │
-│                     │ nlc_fit.py          │ nlc_fit_ftlm.py         │
+│                     │ nlc_fit_triangular.py          │ nlc_fit_ftlm.py         │
 ├─────────────────────┼─────────────────────┼─────────────────────────┤
 │ Method              │ --method FULL       │ --method FTLM           │
 │                     │                     │ --ftlm_samples 30       │
@@ -226,7 +226,7 @@ If you have existing Standard NLCE results and want to switch to FTLM:
 
 4. Update fitting scripts:
    ------------------------
-   OLD: python qed_nlce/analysis/nlc_fit.py ...
+   OLD: python qed_nlce/analysis/nlc_fit_triangular.py ...
    NEW: python qed_nlce/analysis/nlc_fit_ftlm.py ...
    
    Command-line arguments are similar but add:

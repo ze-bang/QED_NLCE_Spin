@@ -22,7 +22,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from qed_nlce.prep.generate_triangular_clusters import (
+from oracle.site_generator import (
     create_triangular_lattice,
     generate_clusters as gen_triangular,
     identify_subclusters as sub_triangular,

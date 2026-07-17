@@ -14,7 +14,7 @@ Public package layout
 
 * :mod:`qed_nlce.geometries`
     Concrete lattice implementations: ``pyrochlore``,
-    ``triangular_site``, ``triangular_triangle``. Importing this
+    ``triangular_triangle``. Importing this
     subpackage triggers all geometry registrations.
 
 * :mod:`qed_nlce.pipelines`

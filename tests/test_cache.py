@@ -133,19 +133,19 @@ def test_eigenvalue_cache_key_digest_is_deterministic(tmp_path, tmp_cluster_file
     ham = _make_ham_dir(str(tmp_path))
     opts = _make_options()
     cache = EigenvalueCache(str(tmp_path / "cache"), enabled=True)
-    k1 = cache.compute_key("triangular_site", ham, tmp_cluster_file, opts, num_sites=3)
-    k2 = cache.compute_key("triangular_site", ham, tmp_cluster_file, opts, num_sites=3)
+    k1 = cache.compute_key("triangular_triangle", ham, tmp_cluster_file, opts, num_sites=3)
+    k2 = cache.compute_key("triangular_triangle", ham, tmp_cluster_file, opts, num_sites=3)
     assert k1.digest() == k2.digest()
 
 
 def test_eigenvalue_cache_key_changes_with_method(tmp_path, tmp_cluster_file):
     ham = _make_ham_dir(str(tmp_path))
     cache = EigenvalueCache(str(tmp_path / "cache"), enabled=True)
-    k_full = cache.compute_key("triangular_site", ham, tmp_cluster_file,
+    k_full = cache.compute_key("triangular_triangle", ham, tmp_cluster_file,
                                _make_options(), num_sites=3)
     opts2 = _make_options()
     opts2.method = "LANCZOS"
-    k_lan = cache.compute_key("triangular_site", ham, tmp_cluster_file,
+    k_lan = cache.compute_key("triangular_triangle", ham, tmp_cluster_file,
                               opts2, num_sites=3)
     assert k_full.digest() != k_lan.digest()
 
@@ -158,7 +158,7 @@ def test_eigenvalue_cache_key_changes_with_oftlm_knobs(tmp_path, tmp_cluster_fil
     OFTLM configuration."""
     ham = _make_ham_dir(str(tmp_path))
     cache = EigenvalueCache(str(tmp_path / "cache"), enabled=True)
-    k_base = cache.compute_key("triangular_site", ham, tmp_cluster_file,
+    k_base = cache.compute_key("triangular_triangle", ham, tmp_cluster_file,
                                _make_options(), num_sites=3)
     for field, value in [
         ("oftlm_cutoff", 1 << 20),
@@ -169,7 +169,7 @@ def test_eigenvalue_cache_key_changes_with_oftlm_knobs(tmp_path, tmp_cluster_fil
     ]:
         opts = _make_options()
         setattr(opts, field, value)
-        k_changed = cache.compute_key("triangular_site", ham, tmp_cluster_file,
+        k_changed = cache.compute_key("triangular_triangle", ham, tmp_cluster_file,
                                       opts, num_sites=3)
         assert k_base.digest() != k_changed.digest(), (
             f"changing {field} must change the cache digest"
@@ -180,9 +180,9 @@ def test_eigenvalue_cache_key_changes_with_hamiltonian(tmp_path, tmp_cluster_fil
     ham_a = _make_ham_dir(str(tmp_path / "a"), suffix="A")
     ham_b = _make_ham_dir(str(tmp_path / "b"), suffix="B")
     cache = EigenvalueCache(str(tmp_path / "cache"), enabled=True)
-    k_a = cache.compute_key("triangular_site", ham_a, tmp_cluster_file,
+    k_a = cache.compute_key("triangular_triangle", ham_a, tmp_cluster_file,
                             _make_options(), num_sites=3)
-    k_b = cache.compute_key("triangular_site", ham_b, tmp_cluster_file,
+    k_b = cache.compute_key("triangular_triangle", ham_b, tmp_cluster_file,
                             _make_options(), num_sites=3)
     assert k_a.digest() != k_b.digest()
 
@@ -193,7 +193,7 @@ def test_eigenvalue_cache_key_changes_with_hamiltonian(tmp_path, tmp_cluster_fil
 def test_eigenvalue_cache_roundtrip(tmp_path, tmp_cluster_file):
     ham = _make_ham_dir(str(tmp_path))
     cache = EigenvalueCache(str(tmp_path / "cache"), enabled=True)
-    key = cache.compute_key("triangular_site", ham, tmp_cluster_file,
+    key = cache.compute_key("triangular_triangle", ham, tmp_cluster_file,
                             _make_options(), num_sites=3)
 
     # Plant a fake ED output.
@@ -222,7 +222,7 @@ def test_eigenvalue_cache_roundtrip(tmp_path, tmp_cluster_file):
 def test_eigenvalue_cache_disabled_is_noop(tmp_path, tmp_cluster_file):
     ham = _make_ham_dir(str(tmp_path))
     cache = EigenvalueCache(str(tmp_path / "cache"), enabled=False)
-    key = cache.compute_key("triangular_site", ham, tmp_cluster_file,
+    key = cache.compute_key("triangular_triangle", ham, tmp_cluster_file,
                             _make_options(), num_sites=3)
     src = tmp_path / "run1" / "output"
     src.mkdir(parents=True)
@@ -254,7 +254,7 @@ def test_subcluster_cache_roundtrip(tmp_path):
     )
 
     cache = SubclusterCache(str(tmp_path / "cache"), enabled=True)
-    cache.store("triangular_site", 3, str(info_a))
+    cache.store("triangular_triangle", 3, str(info_a))
     assert cache.stats.stores == 1
 
     # Fresh dir with the same cluster set but no subclusters_info.txt.
@@ -264,7 +264,7 @@ def test_subcluster_cache_roundtrip(tmp_path):
     shutil.copy(info_a / "cluster_2.dat", info_b / "cluster_2.dat")
     assert not (info_b / "subclusters_info.txt").exists()
 
-    assert cache.lookup("triangular_site", 3, str(info_b)) is True
+    assert cache.lookup("triangular_triangle", 3, str(info_b)) is True
     assert (info_b / "subclusters_info.txt").is_file()
     assert (info_b / "subclusters_info.txt").read_text() == \
         (info_a / "subclusters_info.txt").read_text()

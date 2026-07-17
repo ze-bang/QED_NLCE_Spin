@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from oracle.dense import solve_spectrum
 from qed_nlce.hamiltonians.cluster import ClusterData
 from qed_nlce.hamiltonians.triangular import build_triangular_operator
-from qed_nlce.prep.generate_triangular_clusters import (
+from oracle.site_generator import (
     _cluster_certificate,
     create_triangular_lattice,
     extract_cluster_info,

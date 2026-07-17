@@ -10,9 +10,6 @@ directly::
     python -m qed_nlce \\
         --geometry=triangular_triangle --pipeline=full_ed --max_order=4 ...
 
-    # site-based expansion (legacy --site_based)
-    python -m qed_nlce \\
-        --geometry=triangular_site --pipeline=full_ed --max_order=4 ...
 
 The translation layer below maps the legacy flag set onto the
 unified CLI's flags.
@@ -22,7 +19,7 @@ expansion (``triangular_triangle``, order = number of triangles: order 2
 is two triangles, and so on), which is normalized PER SITE. The legacy
 ``--site_based`` flag is retired -- the site-based expansion converges
 poorly on a frustrated lattice and now exists only as a correctness
-oracle (see ``geometries/triangular_site.py``).
+oracle (see ``tests/oracle/site_generator.py``).
 """
 
 from __future__ import annotations
@@ -57,8 +54,9 @@ def _translate_argv(argv: list[str]) -> list[str]:
         raise SystemExit(
             "--site_based is retired: NLCE on the triangular lattice runs only "
             "through the triangle-based expansion (order = #triangles), which "
-            "is per-site normalized. The site-based expansion is kept solely as "
-            "a correctness oracle (geometries/triangular_site.py)."
+            "is per-site normalized. The site-based expansion is DELETED; its "
+            "generator survives only as a test oracle "
+            "(tests/oracle/site_generator.py)."
         )
     geometry = "triangular_triangle"
 
