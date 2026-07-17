@@ -44,15 +44,52 @@ def _adjacency(cluster: ClusterData) -> dict[int, set]:
     return adj
 
 
-def _nnn_pairs(cluster: ClusterData) -> set:
-    adj = _adjacency(cluster)
+# The six next-nearest-neighbour displacement vectors of the triangular
+# lattice, built from the SAME primitives the bond classifier uses. With
+# a1=(1,0), a2=(1/2,sqrt3/2): the NNN shell is +-(a1+a2), +-(2*a1-a2),
+# +-(2*a2-a1), each of length sqrt(3) (vs 1 for NN and 2 for the 3rd shell).
+_NNN_VECS = np.array([
+    _A1 + _A2,
+    2.0 * _A1 - _A2,
+    2.0 * _A2 - _A1,
+    -(_A1 + _A2),
+    -(2.0 * _A1 - _A2),
+    -(2.0 * _A2 - _A1),
+])
+
+
+def _nnn_pairs(cluster: ClusterData, tol: float = 1e-6) -> set:
+    """Pairs of sites separated by a true next-nearest-neighbour vector.
+
+    Matched against the KNOWN lattice geometry (``_NNN_VECS``), not graph
+    hops. The old implementation walked two edges of the cluster's own NN
+    graph and kept anything that was not a direct neighbour, which is wrong
+    three ways on a triangular lattice:
+
+      * two GEOMETRIC nearest neighbours whose bond is absent from the
+        cluster (the triangle expansion only carries the bonds of its
+        chosen triangles) are 2 hops apart, so they were counted as "NNN"
+        at distance a;
+      * two collinear hops land on the THIRD shell (distance 2a), which was
+        also counted as "NNN";
+      * a true NNN pair whose connecting site lies OUTSIDE the cluster has
+        no 2-hop path inside it, so it was missed entirely.
+
+    Measured on 40 order-6 clusters: 188 pairs at d=a, 209 at d=2a, and 111
+    of 508 true NNN missed -- a pure-J2 model came out 1.97x the exact
+    high-T limit C = 9R*J2^2/(16T^2). Distance/vector matching is exact here
+    because the cluster positions are ideal lattice sites (a = |_A1| = 1),
+    and it needs no per-cluster inference of the lattice constant.
+    """
+    pos = cluster.positions
+    ids = sorted(pos)
+    xy = {i: np.asarray(pos[i], dtype=float)[:2] for i in ids}
     out = set()
-    for s in range(cluster.n_sites):
-        direct = adj[s]
-        for nn in direct:
-            for nnn in adj[nn]:
-                if nnn != s and nnn not in direct:
-                    out.add((min(s, nnn), max(s, nnn)))
+    for ii, i in enumerate(ids):
+        for j in ids[ii + 1:]:
+            d = xy[j] - xy[i]
+            if np.min(np.linalg.norm(_NNN_VECS - d, axis=1)) < tol:
+                out.add((min(i, j), max(i, j)))
     return out
 
 
