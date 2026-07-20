@@ -256,25 +256,25 @@ class PyrochloreNLCERunner:
             # <=12870-dim sectors instead of a 65536-dim Sz-broken dense solve
             # (~1.3 GB/40 s vs ~34 GB/1 h) -- the difference between a
             # DE-viable order-5 fit and an OOM.
-            Jzz_K = params[0] * MEV_TO_K
-            Jpm_K = params[1] * MEV_TO_K
-            Jpmpm_K = params[2] * MEV_TO_K if len(params) >= 3 else 0.0
-            Jxx_K, Jyy_K = -Jpm_K + Jpmpm_K, -Jpm_K - Jpmpm_K
+            Jzz = params[0]                                        # K
+            Jpm = params[1]                                        # K
+            Jpmpm = params[2] if len(params) >= 3 else 0.0        # K
+            Jxx, Jyy = -Jpm + Jpmpm, -Jpm - Jpmpm
             h = h_override if h_override is not None else 0.0
-            return [f"--Jxx={Jxx_K:.12f}", f"--Jyy={Jyy_K:.12f}",
-                    f"--Jzz={Jzz_K:.12f}", f"--h={h:.12f}"]
+            return [f"--Jxx={Jxx:.12f}", f"--Jyy={Jyy:.12f}",
+                    f"--Jzz={Jzz:.12f}", f"--h={h:.12f}"]
         if self.model == "xyz":
-            Jxx_K, Jyy_K, Jzz_K = params[:3] * MEV_TO_K
+            Jxx, Jyy, Jzz = params[0], params[1], params[2]      # K
             h = (h_override if h_override is not None
-                 else (params[3] * MEV_TO_K if len(params) > 3 else 0.0))
-            return [f"--Jxx={Jxx_K:.12f}", f"--Jyy={Jyy_K:.12f}",
-                    f"--Jzz={Jzz_K:.12f}", f"--h={h:.12f}"]
+                 else (params[3] if len(params) > 3 else 0.0))
+            return [f"--Jxx={Jxx:.12f}", f"--Jyy={Jyy:.12f}",
+                    f"--Jzz={Jzz:.12f}", f"--h={h:.12f}"]
         if self.model == "heisenberg":
-            J_K = params[0] * MEV_TO_K
+            J = params[0]                                          # K
             h = (h_override if h_override is not None
-                 else (params[1] * MEV_TO_K if len(params) > 1 else 0.0))
-            return [f"--Jxx={J_K:.12f}", f"--Jyy={J_K:.12f}",
-                    f"--Jzz={J_K:.12f}", f"--h={h:.12f}"]
+                 else (params[1] if len(params) > 1 else 0.0))
+            return [f"--Jxx={J:.12f}", f"--Jyy={J:.12f}",
+                    f"--Jzz={J:.12f}", f"--h={h:.12f}"]
         raise ValueError(f"Unknown model: {self.model!r}")
 
     # ------------------------------------------------------------------
@@ -665,11 +665,11 @@ class PyrochloreNLCEFit:
 # CLI
 # ---------------------------------------------------------------------------
 
-# Convention: user-facing coupling parameters (Jzz, Jpm, h) are in meV.
-# The Hamiltonian builder and NLC_sum work in Kelvin (energy_unit=dimensionless),
-# so _param_to_flags applies MEV_TO_K before building the qed_nlce CLI command.
+# Convention A: ALL coupling parameters (Jzz, Jpm, Jpmpm, h) are in Kelvin
+# throughout — fit bounds, initial values, CLI flags, and NLC_sum (energy_unit=dimensionless).
 # Zeeman: h[K] = B[T] * g_eff * mu_B/k_B = B * g_eff * MU_B_K
-MEV_TO_K = 1.0 / 0.08617      # 11.6045 K/meV  (k_B = 0.08617 meV/K)
+# To convert results to meV post-hoc: divide by MEV_TO_K = 11.6045 K/meV.
+MEV_TO_K = 1.0 / 0.08617      # 11.6045 K/meV — for post-fit reporting only
 MU_B_K   = 0.05788 / 0.08617  # 0.6717  K/T    (mu_B / k_B)
 G_EFF  = 5.4                  # effective g along local [111] (Kimura 2013 / Sibille 2018)
 # In-window magnetic-Cv ceiling (J/mol-Pr/K) for the NLCE divergence rejector.
@@ -734,19 +734,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--g_eff", type=float, default=G_EFF,
                         help="Effective g along local [111] for the Zeeman "
                              "conversion h[K]=B[T]*g_eff*mu_B/k_B (default %(default)s).")
-    # QSI initial / bounds
-    parser.add_argument("--Jzz_init", type=float, default=0.5)
-    parser.add_argument("--Jpm_init", type=float, default=0.25)
-    parser.add_argument("--Jpmpm_init", type=float, default=0.0)
-    parser.add_argument("--Jzpm_init", type=float, default=0.0)
-    parser.add_argument("--Jzz_min",  type=float, default=-2.0)
-    parser.add_argument("--Jzz_max",  type=float, default=2.0)
-    parser.add_argument("--Jpm_min",  type=float, default=-2.0)
-    parser.add_argument("--Jpm_max",  type=float, default=2.0)
-    parser.add_argument("--Jpmpm_min", type=float, default=-1.0)
-    parser.add_argument("--Jpmpm_max", type=float, default=1.0)
-    parser.add_argument("--Jzpm_min", type=float, default=-1.0)
-    parser.add_argument("--Jzpm_max", type=float, default=1.0)
+    # QSI initial / bounds — Convention A: all values in Kelvin
+    parser.add_argument("--Jzz_init", type=float, default=5.0,   help="K")
+    parser.add_argument("--Jpm_init", type=float, default=2.5,   help="K")
+    parser.add_argument("--Jpmpm_init", type=float, default=0.0, help="K")
+    parser.add_argument("--Jzpm_init", type=float, default=0.0,  help="K")
+    parser.add_argument("--Jzz_min",  type=float, default=0.0,   help="K")
+    parser.add_argument("--Jzz_max",  type=float, default=30.0,  help="K")
+    parser.add_argument("--Jpm_min",  type=float, default=-10.0, help="K")
+    parser.add_argument("--Jpm_max",  type=float, default=10.0,  help="K")
+    parser.add_argument("--Jpmpm_min", type=float, default=-5.0, help="K")
+    parser.add_argument("--Jpmpm_max", type=float, default=5.0,  help="K")
+    parser.add_argument("--Jzpm_min", type=float, default=-5.0,  help="K")
+    parser.add_argument("--Jzpm_max", type=float, default=5.0,   help="K")
 
     # --- NLCE ---
     parser.add_argument("--max_order", type=int, default=8)
