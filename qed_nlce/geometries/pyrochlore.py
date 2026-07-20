@@ -42,10 +42,10 @@ class Pyrochlore(Geometry):
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         g = parser.add_argument_group("pyrochlore model parameters")
-        g.add_argument("--Jxx", type=float, default=1.0, help="Jxx coupling")
-        g.add_argument("--Jyy", type=float, default=1.0, help="Jyy coupling")
-        g.add_argument("--Jzz", type=float, default=1.0, help="Jzz coupling")
-        g.add_argument("--h", type=float, default=0.0, help="Magnetic field strength")
+        g.add_argument("--Jxx", type=float, default=1.0, help="Jxx coupling (Kelvin)")
+        g.add_argument("--Jyy", type=float, default=1.0, help="Jyy coupling (Kelvin)")
+        g.add_argument("--Jzz", type=float, default=1.0, help="Jzz coupling (Kelvin)")
+        g.add_argument("--h", type=float, default=0.0, help="Magnetic field strength (Kelvin)")
         g.add_argument(
             "--field_dir", type=float, nargs=3,
             default=[1 / math.sqrt(3)] * 3,
@@ -55,15 +55,6 @@ class Pyrochlore(Geometry):
             "--random_field_width", type=float, default=0.0,
             help="Width of the random transverse field (default 0)",
         )
-
-    def finalize_args(self, args) -> None:
-        # Pyrochlore couplings (Jxx/Jyy/Jzz/h) are in meV; the summation
-        # kernel must convert to Kelvin via 1/k_B = 11.6045 K/meV so that
-        # exp(-E/k_B T) is dimensionally consistent.  Only override the
-        # pipeline default ("dimensionless") if the user did not explicitly
-        # set --energy_unit on the CLI (i.e. it's still at the pipeline default).
-        if getattr(args, "energy_unit", "dimensionless") == "dimensionless":
-            args.energy_unit = "meV"
 
     # ------------------------------------------------------ cluster gen
 

@@ -256,24 +256,25 @@ class PyrochloreNLCERunner:
             # <=12870-dim sectors instead of a 65536-dim Sz-broken dense solve
             # (~1.3 GB/40 s vs ~34 GB/1 h) -- the difference between a
             # DE-viable order-5 fit and an OOM.
-            Jzz, Jpm = params[0], params[1]
-            Jpmpm = params[2] if len(params) >= 3 else 0.0
-            Jxx, Jyy = -Jpm + Jpmpm, -Jpm - Jpmpm
+            Jzz_K = params[0] * MEV_TO_K
+            Jpm_K = params[1] * MEV_TO_K
+            Jpmpm_K = params[2] * MEV_TO_K if len(params) >= 3 else 0.0
+            Jxx_K, Jyy_K = -Jpm_K + Jpmpm_K, -Jpm_K - Jpmpm_K
             h = h_override if h_override is not None else 0.0
-            return [f"--Jxx={Jxx:.12f}", f"--Jyy={Jyy:.12f}",
-                    f"--Jzz={Jzz:.12f}", f"--h={h:.12f}"]
+            return [f"--Jxx={Jxx_K:.12f}", f"--Jyy={Jyy_K:.12f}",
+                    f"--Jzz={Jzz_K:.12f}", f"--h={h:.12f}"]
         if self.model == "xyz":
-            Jxx, Jyy, Jzz = params[:3]
+            Jxx_K, Jyy_K, Jzz_K = params[:3] * MEV_TO_K
             h = (h_override if h_override is not None
-                 else (params[3] if len(params) > 3 else 0.0))
-            return [f"--Jxx={Jxx:.12f}", f"--Jyy={Jyy:.12f}",
-                    f"--Jzz={Jzz:.12f}", f"--h={h:.12f}"]
+                 else (params[3] * MEV_TO_K if len(params) > 3 else 0.0))
+            return [f"--Jxx={Jxx_K:.12f}", f"--Jyy={Jyy_K:.12f}",
+                    f"--Jzz={Jzz_K:.12f}", f"--h={h:.12f}"]
         if self.model == "heisenberg":
-            J = params[0]
+            J_K = params[0] * MEV_TO_K
             h = (h_override if h_override is not None
-                 else (params[1] if len(params) > 1 else 0.0))
-            return [f"--Jxx={J:.12f}", f"--Jyy={J:.12f}",
-                    f"--Jzz={J:.12f}", f"--h={h:.12f}"]
+                 else (params[1] * MEV_TO_K if len(params) > 1 else 0.0))
+            return [f"--Jxx={J_K:.12f}", f"--Jyy={J_K:.12f}",
+                    f"--Jzz={J_K:.12f}", f"--h={h:.12f}"]
         raise ValueError(f"Unknown model: {self.model!r}")
 
     # ------------------------------------------------------------------
@@ -284,7 +285,7 @@ class PyrochloreNLCERunner:
             h: Optional[float] = None,
             field_dir: Optional[tuple] = None) -> Optional[dict[str, np.ndarray]]:
         """Run the full NLCE pipeline for ``params`` at Zeeman field ``h``
-        (meV) along ``field_dir``. Returns dict with keys ``T``, ``Cv``, ``S``
+        (K) along ``field_dir``. Returns dict with keys ``T``, ``Cv``, ``S``
         (all 1D float arrays), or ``None`` on failure.
         """
         params = np.asarray(params, dtype=float)
@@ -491,14 +492,14 @@ class PyrochloreNLCEFit:
 
     def chi2(self, params: np.ndarray) -> float:
         """Evaluate chi2 for ``params``, summing over datasets. Each dataset may
-        carry its own Zeeman field (``h_meV`` / ``field_dir``); the NLCE is run
+        carry its own Zeeman field (``h_K`` / ``field_dir``); the NLCE is run
         once per distinct field (the runner caches on params+field)."""
         params = np.asarray(params, dtype=float)
         self._n_eval += 1
 
         # Floating g-factor: when "g_eff" is a fit parameter, the Zeeman
         # field of each dataset is recomputed per evaluation from its stored
-        # B (Tesla): h[meV] = B * g_eff * MU_B_MEV. The model couplings passed to
+        # B (Tesla): h[K] = B * g_eff * MU_B_K. The model couplings passed to
         # the NLCE runner exclude g_eff (it only enters through h).
         g_idx = self.param_names.index("g_eff") if "g_eff" in self.param_names else None
         p_model = params if g_idx is None else np.delete(params, g_idx)
@@ -506,9 +507,9 @@ class PyrochloreNLCEFit:
         total = 0.0
         for ds in self.datasets:
             # Per-field evaluation (multi-field fit); h=None -> zero/single field.
-            h = ds.get("h_meV")
+            h = ds.get("h_K")
             if g_idx is not None and ds.get("B_tesla") is not None:
-                h = float(ds["B_tesla"]) * float(params[g_idx]) * MU_B_MEV
+                h = float(ds["B_tesla"]) * float(params[g_idx]) * MU_B_K
             result = self.runner.run(
                 p_model, h=h, field_dir=ds.get("field_dir"))
             if result is None:
@@ -664,11 +665,12 @@ class PyrochloreNLCEFit:
 # CLI
 # ---------------------------------------------------------------------------
 
-# Zeeman conversion: pyrochlore couplings (Jxx/Jyy/Jzz) are in meV; h must
-# therefore also be in meV so all Hamiltonian energies share the same unit.
-# NLC_sum then applies the 1/k_B = 11.6045 K/meV scale factor via --energy_unit=meV.
-#   h[meV] = B[T] * g_eff * mu_B[meV/T] = B * g_eff * 0.05788 meV/T
-MU_B_MEV = 0.05788             # mu_B in meV/T (CODATA: 9.274e-24 J/T / 1.602e-22 J/meV)
+# Convention: user-facing coupling parameters (Jzz, Jpm, h) are in meV.
+# The Hamiltonian builder and NLC_sum work in Kelvin (energy_unit=dimensionless),
+# so _param_to_flags applies MEV_TO_K before building the qed_nlce CLI command.
+# Zeeman: h[K] = B[T] * g_eff * mu_B/k_B = B * g_eff * MU_B_K
+MEV_TO_K = 1.0 / 0.08617      # 11.6045 K/meV  (k_B = 0.08617 meV/K)
+MU_B_K   = 0.05788 / 0.08617  # 0.6717  K/T    (mu_B / k_B)
 G_EFF  = 5.4                  # effective g along local [111] (Kimura 2013 / Sibille 2018)
 # In-window magnetic-Cv ceiling (J/mol-Pr/K) for the NLCE divergence rejector.
 # Physical doublet features are <~4; NLCE non-convergence diverges to >~20.
@@ -676,7 +678,7 @@ CV_CEILING = 8.0
 
 
 def _load_dataset(path: str, *, T_min=None, T_max=None, weight=1.0,
-                  obs="Cv", h_meV=None, field_dir=None) -> dict:
+                  obs="Cv", h_K=None, field_dir=None) -> dict:
     """Load a two-column (T, observable) text file (optionally field-tagged)."""
     data = np.loadtxt(path)
     ds = {
@@ -686,8 +688,8 @@ def _load_dataset(path: str, *, T_min=None, T_max=None, weight=1.0,
         "T_max": T_max if T_max is not None else data[-1, 0],
         "weight": weight,
     }
-    if h_meV is not None:
-        ds["h_meV"] = float(h_meV)
+    if h_K is not None:
+        ds["h_K"] = float(h_K)
     if field_dir is not None:
         ds["field_dir"] = tuple(float(x) for x in field_dir)
     return ds
@@ -731,7 +733,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                         help="Upper bound for a floating g_eff (default 7.0).")
     parser.add_argument("--g_eff", type=float, default=G_EFF,
                         help="Effective g along local [111] for the Zeeman "
-                             "conversion h[meV]=B[T]*g_eff*mu_B (default %(default)s).")
+                             "conversion h[K]=B[T]*g_eff*mu_B/k_B (default %(default)s).")
     # QSI initial / bounds
     parser.add_argument("--Jzz_init", type=float, default=0.5)
     parser.add_argument("--Jpm_init", type=float, default=0.25)
@@ -828,15 +830,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         ds_list = cfg.get("datasets") or cfg.get("experimental_data") or []
         for ds_cfg in ds_list:
             B = ds_cfg.get("h")   # field in Tesla for a multi-field dataset
-            # Field in meV (pyrochlore couplings are in meV; NLC_sum converts to K).
-            h_meV = (float(B) * args.g_eff * MU_B_MEV) if B is not None else None
+            # h in Kelvin: Hamiltonian builder and NLC_sum work in K (energy_unit=dimensionless).
+            h_K = (float(B) * args.g_eff * MU_B_K) if B is not None else None
             ds = _load_dataset(
                 ds_cfg["file"],
                 T_min=ds_cfg.get("T_min", ds_cfg.get("temp_min")),
                 T_max=ds_cfg.get("T_max", ds_cfg.get("temp_max")),
                 weight=ds_cfg.get("weight", 1.0),
                 obs=ds_cfg.get("observable", "Cv"),
-                h_meV=h_meV,
+                h_K=h_K,
                 field_dir=ds_cfg.get("field_dir"),
             )
             if B is not None:
@@ -856,9 +858,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         parser.error("Provide --exp_Cv or --exp_config.")
 
     # --- Parameter setup ---
-    # Multi-field fits derive the Zeeman h per dataset (h_meV), so h is NOT a
+    # Multi-field fits derive the Zeeman h per dataset (h_K), so h is NOT a
     # fit parameter; single/zero-field fits keep h in the vector.
-    multi_field = any("h_meV" in ds for ds in datasets)
+    multi_field = any("h_K" in ds for ds in datasets)
 
     def _jb(lo, hi):  # coupling bound helper (fall back to the Jzz window)
         return (getattr(args, lo, args.Jzz_min), getattr(args, hi, args.Jzz_max))
@@ -897,7 +899,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             parser.error("--float_g requires a multi-field --exp_config "
                          "(datasets with Tesla 'h' fields).")
         # g-factor calibration: the Zeeman scale of every in-field dataset is
-        # recomputed per evaluation as h = B * g_eff * MU_B_MEV (see chi2).
+        # recomputed per evaluation as h = B * g_eff * MU_B_K (see chi2).
         param_names = param_names + ["g_eff"]
         bounds = bounds + [(args.g_min, args.g_max)]
         initial = np.append(initial, args.g_eff)
