@@ -498,7 +498,7 @@ class PyrochloreNLCEFit:
 
         # Floating g-factor: when "g_eff" is a fit parameter, the Zeeman
         # field of each dataset is recomputed per evaluation from its stored
-        # B (Tesla): h[K] = B * g_eff * MU_B_K. The model couplings passed to
+        # B (Tesla): h[meV] = B * g_eff * MU_B_MEV. The model couplings passed to
         # the NLCE runner exclude g_eff (it only enters through h).
         g_idx = self.param_names.index("g_eff") if "g_eff" in self.param_names else None
         p_model = params if g_idx is None else np.delete(params, g_idx)
@@ -508,7 +508,7 @@ class PyrochloreNLCEFit:
             # Per-field evaluation (multi-field fit); h=None -> zero/single field.
             h = ds.get("h_meV")
             if g_idx is not None and ds.get("B_tesla") is not None:
-                h = float(ds["B_tesla"]) * float(params[g_idx]) * MU_B_K
+                h = float(ds["B_tesla"]) * float(params[g_idx]) * MU_B_MEV
             result = self.runner.run(
                 p_model, h=h, field_dir=ds.get("field_dir"))
             if result is None:
@@ -588,6 +588,20 @@ class PyrochloreNLCEFit:
         t0 = time.time()
 
         if method == "differential_evolution":
+            # Build the initial population so the warm-start point is
+            # guaranteed to be a member.  scipy DE normalises init to [0,1]
+            # per-dimension; we undo that here then redo it.
+            lo = np.array([b[0] for b in self.bounds])
+            hi = np.array([b[1] for b in self.bounds])
+            n_dim  = len(self.bounds)
+            n_pop  = popsize * n_dim
+            rng    = np.random.default_rng(seed)
+            samp   = qmc.LatinHypercube(d=n_dim, seed=rng)
+            # unit-cube population (what scipy expects for `init`)
+            init_pop = samp.random(n_pop)
+            if initial_params is not None:
+                # Replace first member with clipped warm start
+                init_pop[0] = (np.clip(initial_params, lo, hi) - lo) / (hi - lo)
             res = differential_evolution(
                 self.chi2,
                 self.bounds,
@@ -596,6 +610,7 @@ class PyrochloreNLCEFit:
                 seed=seed,
                 workers=workers,
                 popsize=popsize,
+                init=init_pop,
                 polish=False,
                 disp=False,
             )
@@ -649,11 +664,11 @@ class PyrochloreNLCEFit:
 # CLI
 # ---------------------------------------------------------------------------
 
-# Zeeman conversion for non-Kramers Pr3+ (4f2) [111] doublet, in KELVIN units
-# (couplings + temperature + field all in K; the data T is already in K):
-#   h[K] = B[T] * G_EFF * (mu_B / k_B) = B * G_EFF * 0.6717 K/T
-# (mu_B/k_B = 0.05788 meV/T / 0.08617 meV/K = 0.6717 K/T).
-MU_B_K = 0.05788 / 0.08617    # = 0.6717 K/T  (mu_B in Kelvin per Tesla)
+# Zeeman conversion: pyrochlore couplings (Jxx/Jyy/Jzz) are in meV; h must
+# therefore also be in meV so all Hamiltonian energies share the same unit.
+# NLC_sum then applies the 1/k_B = 11.6045 K/meV scale factor via --energy_unit=meV.
+#   h[meV] = B[T] * g_eff * mu_B[meV/T] = B * g_eff * 0.05788 meV/T
+MU_B_MEV = 0.05788             # mu_B in meV/T (CODATA: 9.274e-24 J/T / 1.602e-22 J/meV)
 G_EFF  = 5.4                  # effective g along local [111] (Kimura 2013 / Sibille 2018)
 # In-window magnetic-Cv ceiling (J/mol-Pr/K) for the NLCE divergence rejector.
 # Physical doublet features are <~4; NLCE non-convergence diverges to >~20.
@@ -813,8 +828,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         ds_list = cfg.get("datasets") or cfg.get("experimental_data") or []
         for ds_cfg in ds_list:
             B = ds_cfg.get("h")   # field in Tesla for a multi-field dataset
-            # Field in KELVIN (couplings + temp are in K); key kept as h_meV.
-            h_meV = (float(B) * args.g_eff * MU_B_K) if B is not None else None
+            # Field in meV (pyrochlore couplings are in meV; NLC_sum converts to K).
+            h_meV = (float(B) * args.g_eff * MU_B_MEV) if B is not None else None
             ds = _load_dataset(
                 ds_cfg["file"],
                 T_min=ds_cfg.get("T_min", ds_cfg.get("temp_min")),
@@ -882,7 +897,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             parser.error("--float_g requires a multi-field --exp_config "
                          "(datasets with Tesla 'h' fields).")
         # g-factor calibration: the Zeeman scale of every in-field dataset is
-        # recomputed per evaluation as h = B * g_eff * MU_B_K (see chi2).
+        # recomputed per evaluation as h = B * g_eff * MU_B_MEV (see chi2).
         param_names = param_names + ["g_eff"]
         bounds = bounds + [(args.g_min, args.g_max)]
         initial = np.append(initial, args.g_eff)

@@ -118,6 +118,13 @@ class Geometry(ABC):
         Returns True on success.
         """
 
+    def finalize_args(self, args: argparse.Namespace) -> None:
+        """Post-parse hook: adjust ``args`` after all argument groups have been
+        parsed.  Called by the CLI after ``parser.parse_args`` so that
+        geometry-specific defaults can safely override pipeline defaults
+        (e.g. ``energy_unit``) without fighting argparse call-order rules.
+        Base implementation is a no-op; override in concrete geometries."""
+
     # -- optional hooks ----------------------------------------------------
 
     def precompute_basis(

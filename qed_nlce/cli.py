@@ -221,6 +221,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
+    # Allow the geometry to adjust defaults that depend on pipeline arg groups
+    # being fully registered (e.g. energy_unit for meV-coupled geometries).
+    geometry.finalize_args(args)
+
     # Apply geometry-default temperature grid if user didn't override.
     if args.temp_min is None:
         args.temp_min = geometry.default_temp_min

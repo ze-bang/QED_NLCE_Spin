@@ -56,6 +56,15 @@ class Pyrochlore(Geometry):
             help="Width of the random transverse field (default 0)",
         )
 
+    def finalize_args(self, args) -> None:
+        # Pyrochlore couplings (Jxx/Jyy/Jzz/h) are in meV; the summation
+        # kernel must convert to Kelvin via 1/k_B = 11.6045 K/meV so that
+        # exp(-E/k_B T) is dimensionally consistent.  Only override the
+        # pipeline default ("dimensionless") if the user did not explicitly
+        # set --energy_unit on the CLI (i.e. it's still at the pipeline default).
+        if getattr(args, "energy_unit", "dimensionless") == "dimensionless":
+            args.energy_unit = "meV"
+
     # ------------------------------------------------------ cluster gen
 
     def generate_clusters(
