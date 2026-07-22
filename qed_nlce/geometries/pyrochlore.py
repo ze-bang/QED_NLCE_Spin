@@ -55,6 +55,13 @@ class Pyrochlore(Geometry):
             "--random_field_width", type=float, default=0.0,
             help="Width of the random transverse field (default 0)",
         )
+        g.add_argument(
+            "--dipole_octupole", action="store_true",
+            help="Use the dipole-octupole (Kramers) bond structure: drop the "
+                 "non-Kramers gamma_ij phase from the J^{+-+-} term, leaving a "
+                 "uniform real XYZ model. Required for Ce2Zr2O7 / Ce2Hf2O7; the "
+                 "default (non-Kramers, gamma_ij) is wrong for those materials.",
+        )
 
     # ------------------------------------------------------ cluster gen
 
@@ -100,6 +107,7 @@ class Pyrochlore(Geometry):
                 Jzz=args.Jzz,
                 h=args.h,
                 field_dir=tuple(args.field_dir),
+                dipole_octupole=getattr(args, "dipole_octupole", False),
             )
             write_operator(op, ham_subdir)
             write_site_info(ham_subdir, cluster_id, order, cluster.n_sites)

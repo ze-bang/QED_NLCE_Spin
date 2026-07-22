@@ -13,6 +13,13 @@ Model (local-frame, spin-1/2, op codes 0=S^+, 1=S^-, 2=S^z)::
     gamma = exp(i 2 pi / 3)
     factor[a,b] = non-Kramers 4x4 bond phase (sublattice = id % 4)
 
+For dipole-octupole Kramers doublets (Ce2Zr2O7, Ce2Hf2O7) the pseudospin
+components tau^x and tau^z are both dipolar-z/octupolar and transform
+trivially under the sublattice-dependent local frames, so the symmetry-
+allowed nearest-neighbour Hamiltonian carries no gamma_ij bond phase: after
+the global rotation about y that removes J_xz it is a uniform real XYZ
+model.  Pass ``dipole_octupole=True`` to set factor[a,b] = 1.
+
     H = sum_{<ij>} [ Jzz S^z_i S^z_j
                      - Jpm (S^+_i S^-_j + S^-_i S^+_j)
                      + conj(Jpmpm*factor) S^+_i S^+_j
@@ -57,6 +64,7 @@ def build_pyrochlore_operator(
     Jzz: float,
     h: float = 0.0,
     field_dir=(1, 1, 1),
+    dipole_octupole: bool = False,
 ) -> SpinHalfOperator:
     """Construct the in-memory pyrochlore operator for ``cluster``."""
     op = SpinHalfOperator(cluster.n_sites)
@@ -85,7 +93,7 @@ def build_pyrochlore_operator(
         i, j = key
         sa = cluster.sublattice[i]
         sb = cluster.sublattice[j]
-        Jpmpm_ = Jpmpm * _NON_KRAMERS[sa, sb]
+        Jpmpm_ = Jpmpm if dipole_octupole else Jpmpm * _NON_KRAMERS[sa, sb]
 
         op.add_two(OP_SZ, i, OP_SZ, j, Jzz)
         op.add_two(OP_SP, i, OP_SM, j, -Jpm)
