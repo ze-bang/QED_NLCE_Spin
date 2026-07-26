@@ -381,6 +381,25 @@ class PyrochloreNLCERunner:
             logging.error("Failed to load %s: %s", cv_file, e)
             return None
 
+        # Filter isolated Wynn epsilon spikes. The epsilon algorithm can produce
+        # a single-point spike when the denominator of the epsilon table is
+        # near zero. These spikes are harmless (physics is correct on all other
+        # grid points) but trigger CV_CEILING and poison the DE. Detect them as
+        # points that deviate from their neighbours by more than a factor of 5
+        # and replace with NaN so _interp_safe bridges the gap linearly.
+        from scipy.ndimage import median_filter as _mf
+        Cv_nbr = _mf(Cv, size=3, mode='nearest')
+        spike_mask = np.abs(Cv - Cv_nbr) > np.maximum(5.0, 3.0 * np.abs(Cv_nbr))
+        if spike_mask.any():
+            logging.warning(
+                "Wynn spike(s) detected and filtered at T=%s K "
+                "(max |Cv|=%.1f → NaN); curve is otherwise clean.",
+                [f"{t:.3f}" for t in T[spike_mask]],
+                np.abs(Cv[spike_mask]).max(),
+            )
+            Cv = Cv.copy()
+            Cv[spike_mask] = np.nan
+
         result = {"T": T, "Cv": Cv}
 
         # Try loading entropy
@@ -430,11 +449,18 @@ def _interp_safe(T_calc, y_calc, T_exp):
     on that shape (undershoot ~0.1 J/mol/K), which both distorts chi2 and
     false-triggers the negative-C divergence rejector. The model grid is a
     dense 40-point log grid -- linear error is negligible against it.
+
+    NaN values in y_calc (e.g. from spike filtering) are excluded so that
+    the interpolation bridges the gap cleanly between the surrounding points.
     """
     if T_calc is None or len(T_calc) < 2:
         return np.full_like(T_exp, np.nan)
     sort = np.argsort(T_calc)
-    fn = interp1d(T_calc[sort], y_calc[sort], kind="linear",
+    T_s, y_s = T_calc[sort], y_calc[sort]
+    valid = np.isfinite(y_s)
+    if valid.sum() < 2:
+        return np.full_like(T_exp, np.nan)
+    fn = interp1d(T_s[valid], y_s[valid], kind="linear",
                   bounds_error=False, fill_value=np.nan)
     return fn(T_exp)
 
