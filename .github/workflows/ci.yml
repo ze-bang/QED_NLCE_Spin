@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Core lane: qed_nlce alone (numpy/scipy dense ED, cluster generation,
+  # NLCE sums). The three test files that exercise the QED-backed exact
+  # tier importorskip("qed") and are skipped here -- the full lane below
+  # covers them. Fast: no C++ build.
+  # ---------------------------------------------------------------------------
+  core:
+    name: Linux / core (no QED backend)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install qed_nlce + test deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .[dev]
+
+      - name: Run pytest (slow markers deselected by addopts)
+        run: |
+          python -m pytest tests -v -rs
+
+  # ---------------------------------------------------------------------------
+  # Full lane: build the sibling ze-bang/QED wheel from its main branch
+  # (CPU-only, same CMAKE_ARGS as QED's own wheel CI job) and run the
+  # complete suite including the QED-backed exact tier
+  # (test_engine_parity, test_exact_router, test_exact_only_routing).
+  #
+  # Cross-repo coupling is deliberate: a QED main regression that breaks
+  # downstream dense-ED routing should turn THIS repo red. The explicit
+  # `import qed` step keeps a broken wheel from degrading into silent
+  # importorskip skips.
+  # ---------------------------------------------------------------------------
+  full-with-qed:
+    name: Linux / full (QED exact tier)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install QED build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            ninja-build \
+            libopenblas-dev \
+            liblapacke-dev \
+            libhdf5-dev \
+            libhdf5-cpp-103 \
+            libeigen3-dev \
+            pkg-config
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install qed_nlce + build tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "scikit-build-core>=0.10" "pybind11>=2.13"
+          python -m pip install -e .[dev]
+
+      - name: Clone QED (main)
+        run: |
+          git clone --depth 1 --branch main https://github.com/ze-bang/QED.git .qed-src
+          git -C .qed-src log -1 --oneline
+
+      - name: Build + install qed wheel (CPU-only)
+        env:
+          CMAKE_ARGS: "-DBUILD_ED_TESTS=OFF -DWITH_CUDA=OFF -DWITH_MPI=OFF -DBLAS_PROFILE=OPENBLAS"
+        run: |
+          python -m pip install -v ./.qed-src
+
+      - name: Verify qed imports (no silent importorskip degradation)
+        run: |
+          python -c "import qed; print('qed OK:', qed.__file__)"
+
+      - name: Run pytest (full suite incl. exact tier)
+        run: |
+          python -m pytest tests -v -rs
