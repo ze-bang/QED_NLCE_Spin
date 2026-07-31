@@ -16,47 +16,21 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Core lane: qed_nlce alone (numpy/scipy dense ED, cluster generation,
-  # NLCE sums). The three test files that exercise the QED-backed exact
-  # tier importorskip("qed") and are skipped here -- the full lane below
-  # covers them. Fast: no C++ build.
-  # ---------------------------------------------------------------------------
-  core:
-    name: Linux / core (no QED backend)
-    runs-on: ubuntu-22.04
-    timeout-minutes: 20
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install qed_nlce + test deps
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e .[dev]
-
-      - name: Run pytest (slow markers deselected by addopts)
-        run: |
-          python -m pytest tests -v -rs
-
-  # ---------------------------------------------------------------------------
-  # Full lane: build the sibling ze-bang/QED wheel from its main branch
+  # Single lane: build the sibling ze-bang/QED wheel from its main branch
   # (CPU-only, same CMAKE_ARGS as QED's own wheel CI job) and run the
-  # complete suite including the QED-backed exact tier
-  # (test_engine_parity, test_exact_router, test_exact_only_routing).
+  # complete suite. There is deliberately NO "core, no-QED" lane:
+  # NLCEWorkflow calls assert_qed_available() at init for every pipeline
+  # (fail fast before cluster work), so the e2e tests -- which spawn
+  # `python -m qed_nlce` subprocesses -- hard-require qed. A qed-less
+  # environment is not a supported configuration of this package.
   #
   # Cross-repo coupling is deliberate: a QED main regression that breaks
   # downstream dense-ED routing should turn THIS repo red. The explicit
   # `import qed` step keeps a broken wheel from degrading into silent
-  # importorskip skips.
+  # importorskip skips in the three files that guard on it.
   # ---------------------------------------------------------------------------
   full-with-qed:
-    name: Linux / full (QED exact tier)
+    name: Linux / full suite (QED exact tier)
     runs-on: ubuntu-22.04
     timeout-minutes: 45
 
