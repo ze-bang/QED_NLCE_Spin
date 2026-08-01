@@ -616,19 +616,24 @@ class PyrochloreNLCEFit:
 
         if method == "differential_evolution":
             # Build the initial population so the warm-start point is
-            # guaranteed to be a member.  scipy DE normalises init to [0,1]
-            # per-dimension; we undo that here then redo it.
+            # guaranteed to be a member.
             lo = np.array([b[0] for b in self.bounds])
             hi = np.array([b[1] for b in self.bounds])
             n_dim  = len(self.bounds)
             n_pop  = popsize * n_dim
             rng    = np.random.default_rng(seed)
             samp   = qmc.LatinHypercube(d=n_dim, seed=rng)
-            # unit-cube population (what scipy expects for `init`)
-            init_pop = samp.random(n_pop)
+            # scipy DE's `init` array expects ACTUAL parameter values with
+            # shape (n_pop, n_dim); it clips them to the bounds internally.
+            # Passing the raw unit-cube LatinHypercube [0,1] values (the old
+            # bug) collapsed every dimension whose lower bound > 1 onto that
+            # bound -- e.g. Jzz in [3,10] and g in [4.5,6.5] were all clipped
+            # to 3.0 / 4.5, leaving only Jpm (bounds spanning [0,1]) free, so
+            # DE could never move Jzz or g. Scale to the real bounds.
+            init_pop = qmc.scale(samp.random(n_pop), lo, hi)
             if initial_params is not None:
-                # Replace first member with clipped warm start
-                init_pop[0] = (np.clip(initial_params, lo, hi) - lo) / (hi - lo)
+                # Replace first member with the clipped warm start (real units)
+                init_pop[0] = np.clip(initial_params, lo, hi)
             res = differential_evolution(
                 self.chi2,
                 self.bounds,
