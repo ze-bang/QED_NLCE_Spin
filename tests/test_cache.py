@@ -400,3 +400,93 @@ def test_prune_cleans_up_emptied_shard_dirs(tmp_path):
     assert os.path.isdir(shard)
     prune_cache(root, max_age_days=1.0)
     assert not os.path.isdir(shard)
+
+
+# ----- automatic, budget-driven eviction -----------------------------------
+
+
+def _make_full_entry(root, key, *, h5=4096, thermo=2048):
+    """An eigenvalue entry with all three parts: .h5, .meta.json, .thermo/."""
+    sh = os.path.join(root, "eigenvalues", key[:2])
+    os.makedirs(sh, exist_ok=True)
+    with open(os.path.join(sh, key + ".h5"), "wb") as f:
+        f.write(b"\0" * h5)
+    with open(os.path.join(sh, key + ".meta.json"), "w") as f:
+        json.dump({"k": key}, f)
+    td = os.path.join(sh, key + ".thermo")
+    os.makedirs(td, exist_ok=True)
+    with open(os.path.join(td, "block.dat"), "wb") as f:
+        f.write(b"\0" * thermo)
+    return sh, td
+
+
+def test_scan_includes_the_thermo_directory(tmp_path):
+    root = str(tmp_path / "cache")
+    _make_full_entry(root, "aa" + "0" * 30, h5=4096, thermo=2048)
+    entries = scan_cache(root)
+    assert len(entries) == 1
+    # .h5 + .meta.json + .thermo/ -- the thermo block is a directory and
+    # would otherwise be invisible to os.walk's filenames.
+    assert len(entries[0].paths) == 3
+    assert entries[0].size >= 4096 + 2048
+
+
+def test_prune_removes_the_thermo_directory_too(tmp_path):
+    root = str(tmp_path / "cache")
+    _sh, td = _make_full_entry(root, "aa" + "0" * 30)
+    assert os.path.isdir(td)
+    prune_cache(root, max_age_days=-1.0)
+    assert not os.path.isdir(td), "thermo block left orphaned after eviction"
+    assert cache_stats(root)["total_entries"] == 0
+
+
+def test_budget_env_parsing(monkeypatch):
+    from qed_nlce.core.cache import cache_budget_from_env
+    monkeypatch.setenv("QED_NLCE_CACHE_MAX_GB", "2")
+    monkeypatch.setenv("QED_NLCE_CACHE_MAX_AGE_DAYS", "7")
+    assert cache_budget_from_env() == (2 * 1024 ** 3, 7.0)
+    # Garbage must not take down a run mid-job.
+    monkeypatch.setenv("QED_NLCE_CACHE_MAX_GB", "not-a-number")
+    assert cache_budget_from_env()[0] is None
+
+
+def test_no_budget_means_no_automatic_eviction(tmp_path, monkeypatch):
+    monkeypatch.delenv("QED_NLCE_CACHE_MAX_GB", raising=False)
+    monkeypatch.delenv("QED_NLCE_CACHE_MAX_AGE_DAYS", raising=False)
+    root = str(tmp_path / "cache")
+    c = EigenvalueCache(cache_dir=root)
+    for i in range(40):
+        _make_full_entry(root, f"{i:032x}")
+        c._maybe_enforce_budget(6144)
+    assert cache_stats(root)["total_entries"] == 40
+
+
+def test_automatic_eviction_keeps_the_cache_bounded(tmp_path, monkeypatch):
+    budget = 200 * 1024
+    monkeypatch.setenv("QED_NLCE_CACHE_MAX_GB", str(budget / 1024 ** 3))
+    root = str(tmp_path / "cache")
+    c = EigenvalueCache(cache_dir=root)
+    for i in range(80):
+        _make_full_entry(root, f"{i:032x}", h5=20480, thermo=10240)
+        c._maybe_enforce_budget(30720)
+    total = cache_stats(root)["total_bytes"]
+    # Enforcement is periodic, so allow slack -- but 80 x 30 KB = 2.4 MB
+    # unbounded, and it must land near the budget, not near that.
+    assert total <= budget * 1.5, f"cache grew to {total} against {budget}"
+
+
+def test_large_entries_do_not_overshoot_before_the_first_check(tmp_path, monkeypatch):
+    """Byte-aware interval: a few big entries must trigger a check early.
+
+    With a count-only interval (every 32 stores) a handful of large
+    entries would blow far past the budget before anything fired.
+    """
+    budget = 300 * 1024
+    monkeypatch.setenv("QED_NLCE_CACHE_MAX_GB", str(budget / 1024 ** 3))
+    root = str(tmp_path / "cache")
+    c = EigenvalueCache(cache_dir=root)
+    for i in range(8):                      # well under _check_every
+        _make_full_entry(root, f"{i:032x}", h5=100 * 1024, thermo=0)
+        c._maybe_enforce_budget(100 * 1024)
+    total = cache_stats(root)["total_bytes"]
+    assert total <= budget * 1.5, f"overshot: {total} against {budget}"

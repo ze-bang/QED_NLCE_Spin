@@ -103,6 +103,23 @@ fi
 
 export OMP_NUM_THREADS="${OMP_THREADS}"
 
+# ---------------------------------------------------------------------------
+# Cache location and budget.
+#
+# qed_nlce caches one eigenvalue entry per (cluster, parameter point). A
+# BO_MAX=200 fit at ORDER=8 therefore writes tens of thousands of them.
+# The default cache root is $HOME/.cache/qed_nlce, and on Alliance
+# clusters $HOME is the quota-limited filesystem -- that is what fills
+# the quota, since nothing evicted entries until now.
+#
+# Keep the cache on scratch, and cap it so a long job self-limits.
+# Entries are content-addressed and rebuilt on the next miss, so an
+# eviction only ever costs recomputation.
+: "${QED_NLCE_CACHE:=${SCRATCH}/NdMgAl_NLCE/cache}"
+: "${QED_NLCE_CACHE_MAX_GB:=50}"
+export QED_NLCE_CACHE QED_NLCE_CACHE_MAX_GB
+mkdir -p "${QED_NLCE_CACHE}"
+
 if [[ -f "${QED_NLCE_ROOT}/qed_nlce/analysis/nlc_fit_triangular.py" ]]; then
   FITTER="${QED_NLCE_ROOT}/qed_nlce/analysis/nlc_fit_triangular.py"
 else

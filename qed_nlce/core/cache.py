@@ -59,6 +59,7 @@ from .ed_runner import EDOptions
 
 __all__ = [
     "default_cache_dir",
+    "cache_budget_from_env",
     "canonical_cluster_hash",
     "EigenvalueCache",
     "SubclusterCache",
@@ -135,6 +136,36 @@ def _atomic_copy_tree(src: str, dst: str) -> None:
         if os.path.isdir(tmp):
             shutil.rmtree(tmp, ignore_errors=True)
 
+
+
+def cache_budget_from_env() -> tuple:
+    """Read the automatic-eviction budget from the environment.
+
+    Returns ``(max_bytes, max_age_days)``, either of which may be None.
+
+    On an HPC cluster the cache lands in ``$HOME/.cache`` unless
+    ``$QED_NLCE_CACHE`` says otherwise, and ``$HOME`` is usually the
+    quota-limited filesystem. A long fitting job stores an entry per
+    (cluster, parameter point), so an unbounded cache is what fills the
+    quota -- set ``QED_NLCE_CACHE_MAX_GB`` (and point
+    ``QED_NLCE_CACHE`` at scratch) to keep a job self-limiting.
+    """
+    max_bytes = None
+    raw = os.environ.get("QED_NLCE_CACHE_MAX_GB")
+    if raw:
+        try:
+            max_bytes = int(float(raw) * 1024 ** 3)
+        except ValueError:
+            logging.warning("[cache] ignoring bad QED_NLCE_CACHE_MAX_GB=%r", raw)
+    max_age = None
+    raw = os.environ.get("QED_NLCE_CACHE_MAX_AGE_DAYS")
+    if raw:
+        try:
+            max_age = float(raw)
+        except ValueError:
+            logging.warning(
+                "[cache] ignoring bad QED_NLCE_CACHE_MAX_AGE_DAYS=%r", raw)
+    return max_bytes, max_age
 
 
 def default_cache_dir() -> str:
@@ -368,6 +399,13 @@ class EigenvalueCache:
         if self.enabled:
             os.makedirs(self.eig_dir, exist_ok=True)
         self.stats = CacheStats()
+        # Automatic eviction. Scanning on every store would be O(entries)
+        # per store, so only check periodically -- the budget is a ceiling
+        # to stay under, not a byte-exact cap.
+        self._max_bytes, self._max_age_days = cache_budget_from_env()
+        self._stores_since_check = 0
+        self._bytes_since_check = 0
+        self._check_every = 32
 
     # ----- key construction -----
 
@@ -494,6 +532,9 @@ class EigenvalueCache:
             logging.info(
                 "[cache] STORE %s  <- %s", digest[:12], output_dir,
             )
+            _, written = _entry_recency_and_size(
+                [p for p in self._entry_paths(digest)])
+            self._maybe_enforce_budget(written)
         except OSError as e:
             logging.warning("[cache] STORE failed for %s: %s", digest[:12], e)
             self.stats.errors += 1
@@ -514,6 +555,42 @@ class EigenvalueCache:
 # ---------------------------------------------------------------------------
 # Subcluster-table cache
 # ---------------------------------------------------------------------------
+
+
+    def _maybe_enforce_budget(self, written_bytes: int = 0) -> None:
+        """Evict down to the configured budget, every `_check_every` stores.
+
+        Entries are content-addressed and rebuilt on the next miss, so
+        eviction is always safe. Failures here must never take down the
+        run that produced the entry, hence the broad guard.
+        """
+        if self._max_bytes is None and self._max_age_days is None:
+            return
+        self._stores_since_check += 1
+        self._bytes_since_check += max(0, int(written_bytes))
+        # Check on whichever comes first: a store count, or enough new
+        # bytes to matter against the budget. Counting alone overshoots
+        # badly when entries are large (32 x 100 MB before the first
+        # check); bytes alone never fires when they are tiny.
+        slack = (self._max_bytes * 0.1) if self._max_bytes else float("inf")
+        if (self._stores_since_check < self._check_every
+                and self._bytes_since_check < slack):
+            return
+        self._stores_since_check = 0
+        self._bytes_since_check = 0
+        try:
+            r = prune_cache(self.cache_dir,
+                            max_age_days=self._max_age_days,
+                            max_bytes=self._max_bytes)
+            if r["entries_removed"]:
+                logging.info(
+                    "[cache] auto-evicted %d entries (%.1f MB); "
+                    "%.1f MB now in %s",
+                    r["entries_removed"], r["bytes_removed"] / 1024 ** 2,
+                    r["bytes_after"] / 1024 ** 2, self.cache_dir,
+                )
+        except Exception as e:                      # never break the run
+            logging.warning("[cache] auto-eviction failed: %s", e)
 
 
 class SubclusterCache:
@@ -652,15 +729,34 @@ class CacheEntry:
         return max(0.0, (time.time() - self.recency) / 86400.0)
 
 
+def _stat_one(path) -> tuple:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return 0.0, 0
+    return max(st.st_mtime, st.st_atime), st.st_size
+
+
 def _entry_recency_and_size(paths) -> tuple:
+    """Newest timestamp and total bytes over `paths`.
+
+    An eigenvalue entry carries a ``<digest>.thermo/`` directory beside
+    its .h5, so directories are walked rather than stat'ed -- otherwise
+    the thermo block counts as ~0 bytes and survives eviction as an
+    orphan.
+    """
     newest, total = 0.0, 0
     for p in paths:
-        try:
-            st = os.stat(p)
-        except OSError:
-            continue
-        total += st.st_size
-        newest = max(newest, st.st_mtime, st.st_atime)
+        if os.path.isdir(p):
+            for dirpath, _dirnames, filenames in os.walk(p):
+                for fn in filenames:
+                    t, sz = _stat_one(os.path.join(dirpath, fn))
+                    newest = max(newest, t)
+                    total += sz
+        else:
+            t, sz = _stat_one(p)
+            newest = max(newest, t)
+            total += sz
     return newest, total
 
 
@@ -683,6 +779,11 @@ def scan_cache(cache_dir: Optional[str] = None) -> list:
             if stem is None:
                 continue
             by_key.setdefault(stem, []).append(os.path.join(dirpath, fn))
+        # The thermo block is a sibling *directory*, not a file, so it
+        # never shows up in `filenames`.
+        for d in _dirnames:
+            if d.endswith(".thermo"):
+                by_key.setdefault(d[:-7], []).append(os.path.join(dirpath, d))
         for key, paths in by_key.items():
             recency, size = _entry_recency_and_size(paths)
             entries.append(CacheEntry(key, "eigenvalues", sorted(paths),
@@ -766,7 +867,10 @@ def prune_cache(cache_dir: Optional[str] = None, *,
         for e in doomed:
             for p in e.paths:
                 try:
-                    os.remove(p)
+                    if os.path.isdir(p):
+                        shutil.rmtree(p)
+                    else:
+                        os.remove(p)
                     removed_files += 1
                 except FileNotFoundError:
                     pass
