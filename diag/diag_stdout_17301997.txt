@@ -1,0 +1,24 @@
+prctl(PR_SET_PTRACER_ANY) ok
+PID=3461627
+read operator: num_sites=19
+  Edge-colored graph: 19 vertices + 36 auxiliary bond vertices
+  Unique bond types: 1
+[qed.find_symmetries] |Aut| = 1152 exceeds clique_budget = 512; greedy maximal-abelian clique (|A| = 24), full residue retained as coset-representative star_perms
+Finding minimal generators for maximal abelian subgroup (input size 24)...
+Found 2 generators (maximal abelian subgroup order 24)
+resolved symmetry in 1.07s: |A|=24 residue=47 sz_conserved=False sz_parity=True time_reversal=True spin_flip=True
+factorisation: |A|=24 n_residues=47
+[little_group plan] star k0=0 k_raw=0 flip=-1 |star|=4 dim=9600
+[little_group plan] star k0=1 k_raw=1 flip=-1 |star|=2 dim=11520
+[little_group plan] star k0=2 k_raw=2 flip=-1 |star|=4 dim=5760
+[little_group plan] star k0=3 k_raw=3 flip=-1 |star|=2 dim=11520
+[little_group plan] star k0=4 k_raw=4 flip=-1 |star|=4 dim=9600
+[little_group plan] star k0=7 k_raw=7 flip=-1 |star|=2 dim=6912
+[little_group plan] star k0=8 k_raw=8 flip=-1 |star|=1 dim=19264
+[little_group plan] star k0=10 k_raw=10 flip=-1 |star|=2 dim=16032
+[little_group plan] star k0=13 k_raw=13 flip=-1 |star|=1 dim=19136
+[little_group plan] star k0=19 k_raw=19 flip=-1 |star|=2 dim=15968
+[little_group] coverage OK: 10 stars tile 262144 states
+[little_group] sum rule SKIPPED: star filter active (covered 0 of 262144)
+PLAN_ONLY returned in 1.19s: 10 stars, max dim_k0=19264
+CALLING qed.full_spectrum(point_group='auto') -- expected to hang; Python stack dumps go to /lustre09/project/6003507/zhouzb79/QED_NLCE/diag/diag_pystack.txt
