@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 
 import pytest
 
@@ -12,8 +13,12 @@ from qed_nlce.core import (
     EDOptions,
     EigenvalueCache,
     SubclusterCache,
+    cache_stats,
     canonical_cluster_hash,
+    clear_cache,
     default_cache_dir,
+    prune_cache,
+    scan_cache,
 )
 
 
@@ -279,3 +284,119 @@ def test_default_cache_dir_respects_env(monkeypatch, tmp_path):
     monkeypatch.delenv("QED_NLCE_CACHE", raising=False)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
     assert default_cache_dir() == os.path.join(str(tmp_path / "xdg"), "qed_nlce")
+
+
+# ----- maintenance: stats and pruning --------------------------------------
+
+
+def _make_entry(root, shard, key, *, size=1024, age_days=0.0):
+    """Write one eigenvalue entry (payload + sidecar) with a set age."""
+    d = os.path.join(root, "eigenvalues", shard)
+    os.makedirs(d, exist_ok=True)
+    h5 = os.path.join(d, f"{key}.h5")
+    meta = os.path.join(d, f"{key}.meta.json")
+    with open(h5, "wb") as f:
+        f.write(b"\0" * size)
+    with open(meta, "w") as f:
+        json.dump({"num_sites": 4}, f)
+    when = time.time() - age_days * 86400.0
+    for p in (h5, meta):
+        os.utime(p, (when, when))
+    return h5, meta
+
+
+def test_scan_groups_payload_with_sidecar(tmp_path):
+    root = str(tmp_path / "cache")
+    _make_entry(root, "ab", "ab" + "0" * 30)
+    entries = scan_cache(root)
+    assert len(entries) == 1
+    assert entries[0].kind == "eigenvalues"
+    # The .h5 and its .meta.json must be one entry, evicted together.
+    assert len(entries[0].paths) == 2
+
+
+def test_stats_counts_entries_and_bytes(tmp_path):
+    root = str(tmp_path / "cache")
+    _make_entry(root, "ab", "ab" + "0" * 30, size=2048)
+    _make_entry(root, "cd", "cd" + "0" * 30, size=4096)
+    st = cache_stats(root)
+    assert st["total_entries"] == 2
+    assert st["by_kind"]["eigenvalues"]["entries"] == 2
+    # Sidecars are small but counted; payload bytes dominate.
+    assert st["total_bytes"] >= 2048 + 4096
+
+
+def test_stats_on_missing_dir_is_empty_not_an_error(tmp_path):
+    st = cache_stats(str(tmp_path / "nope"))
+    assert st["exists"] is False
+    assert st["total_entries"] == 0
+
+
+def test_prune_by_age_removes_only_the_stale(tmp_path):
+    root = str(tmp_path / "cache")
+    _make_entry(root, "ab", "ab" + "0" * 30, age_days=100.0)
+    fresh, _ = _make_entry(root, "cd", "cd" + "0" * 30, age_days=1.0)
+    r = prune_cache(root, max_age_days=30.0)
+    assert r["entries_removed"] == 1
+    assert os.path.exists(fresh)
+    assert cache_stats(root)["total_entries"] == 1
+
+
+def test_prune_by_size_evicts_coldest_first(tmp_path):
+    root = str(tmp_path / "cache")
+    _make_entry(root, "ab", "ab" + "0" * 30, size=4096, age_days=50.0)
+    warm, _ = _make_entry(root, "cd", "cd" + "0" * 30, size=4096, age_days=1.0)
+    # Budget fits roughly one entry, so the 50-day-old one goes first.
+    r = prune_cache(root, max_bytes=5000)
+    assert r["entries_removed"] == 1
+    assert os.path.exists(warm)
+
+
+def test_prune_dry_run_deletes_nothing(tmp_path):
+    root = str(tmp_path / "cache")
+    h5, meta = _make_entry(root, "ab", "ab" + "0" * 30, age_days=100.0)
+    r = prune_cache(root, max_age_days=1.0, dry_run=True)
+    assert r["entries_removed"] == 1
+    assert r["dry_run"] is True
+    assert os.path.exists(h5) and os.path.exists(meta)
+
+
+def test_prune_without_a_policy_is_a_no_op(tmp_path):
+    root = str(tmp_path / "cache")
+    _make_entry(root, "ab", "ab" + "0" * 30, age_days=999.0)
+    r = prune_cache(root)
+    assert r["entries_removed"] == 0
+    assert cache_stats(root)["total_entries"] == 1
+
+
+def test_clear_removes_everything(tmp_path):
+    root = str(tmp_path / "cache")
+    _make_entry(root, "ab", "ab" + "0" * 30)
+    _make_entry(root, "cd", "cd" + "0" * 30, age_days=0.0)
+    r = clear_cache(root)
+    assert r["entries_removed"] == 2
+    assert cache_stats(root)["total_entries"] == 0
+
+
+def test_subcluster_entries_are_scanned_and_pruned(tmp_path):
+    root = str(tmp_path / "cache")
+    d = os.path.join(root, "subclusters", "triangular_site")
+    os.makedirs(d)
+    p = os.path.join(d, "a" * 32 + ".txt")
+    with open(p, "w") as f:
+        f.write("1 2 3\n")
+    old = time.time() - 200 * 86400.0
+    os.utime(p, (old, old))
+    assert cache_stats(root)["by_kind"]["subclusters"]["entries"] == 1
+    r = prune_cache(root, max_age_days=30.0)
+    assert r["entries_removed"] == 1
+    assert not os.path.exists(p)
+
+
+def test_prune_cleans_up_emptied_shard_dirs(tmp_path):
+    root = str(tmp_path / "cache")
+    _make_entry(root, "ab", "ab" + "0" * 30, age_days=100.0)
+    shard = os.path.join(root, "eigenvalues", "ab")
+    assert os.path.isdir(shard)
+    prune_cache(root, max_age_days=1.0)
+    assert not os.path.isdir(shard)

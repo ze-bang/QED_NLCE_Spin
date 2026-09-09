@@ -62,6 +62,11 @@ __all__ = [
     "canonical_cluster_hash",
     "EigenvalueCache",
     "SubclusterCache",
+    "CacheEntry",
+    "scan_cache",
+    "cache_stats",
+    "prune_cache",
+    "clear_cache",
 ]
 
 
@@ -614,3 +619,191 @@ class SubclusterCache:
             "%d stored, %d errors",
             log_tag, s.hits, s.misses, rate, s.stores, s.errors,
         )
+
+
+# ---------------------------------------------------------------------------
+# Maintenance: stats and pruning
+# ---------------------------------------------------------------------------
+#
+# Nothing above ever deletes a cache entry, so a machine that runs many
+# scans accumulates them without bound. Entries are content-addressed and
+# rebuildable (see the module docstring), so eviction is always safe: the
+# worst case is paying the ED cost again on the next miss.
+#
+# "Recency" is the newest of mtime/atime over an entry's files. Access
+# time is the honest signal for LRU, but many filesystems are mounted
+# noatime (and WSL2's drvfs is inconsistent about it), so mtime is the
+# floor -- an entry that was written recently is never treated as cold.
+
+
+@dataclass
+class CacheEntry:
+    """One logical cache entry: a primary file plus its sidecars."""
+
+    key: str
+    kind: str                       # "eigenvalues" | "subclusters"
+    paths: list                     # every file to unlink together
+    size: int                       # summed bytes
+    recency: float                  # newest mtime/atime across `paths`
+
+    @property
+    def age_days(self) -> float:
+        import time
+        return max(0.0, (time.time() - self.recency) / 86400.0)
+
+
+def _entry_recency_and_size(paths) -> tuple:
+    newest, total = 0.0, 0
+    for p in paths:
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        total += st.st_size
+        newest = max(newest, st.st_mtime, st.st_atime)
+    return newest, total
+
+
+def scan_cache(cache_dir: Optional[str] = None) -> list:
+    """Enumerate every cache entry under ``cache_dir``.
+
+    Eigenvalue entries group ``<hash>.h5`` with its ``<hash>.meta.json``
+    sidecar so the pair is always evicted together -- a stranded
+    ``.meta.json`` would otherwise advertise a payload that is gone.
+    """
+    root = cache_dir or default_cache_dir()
+    entries = []
+
+    eig_root = os.path.join(root, "eigenvalues")
+    for dirpath, _dirnames, filenames in os.walk(eig_root):
+        by_key = {}
+        for fn in filenames:
+            stem = fn[:-3] if fn.endswith(".h5") else (
+                fn[:-10] if fn.endswith(".meta.json") else None)
+            if stem is None:
+                continue
+            by_key.setdefault(stem, []).append(os.path.join(dirpath, fn))
+        for key, paths in by_key.items():
+            recency, size = _entry_recency_and_size(paths)
+            entries.append(CacheEntry(key, "eigenvalues", sorted(paths),
+                                      size, recency))
+
+    sub_root = os.path.join(root, "subclusters")
+    for dirpath, _dirnames, filenames in os.walk(sub_root):
+        geom = os.path.basename(dirpath)
+        for fn in filenames:
+            if not fn.endswith(".txt"):
+                continue
+            p = os.path.join(dirpath, fn)
+            recency, size = _entry_recency_and_size([p])
+            entries.append(CacheEntry(f"{geom}/{fn[:-4]}", "subclusters",
+                                      [p], size, recency))
+
+    return entries
+
+
+def cache_stats(cache_dir: Optional[str] = None) -> dict:
+    """Summarise cache occupancy, by kind."""
+    root = cache_dir or default_cache_dir()
+    entries = scan_cache(root)
+    out = {
+        "cache_dir": root,
+        "exists": os.path.isdir(root),
+        "total_entries": len(entries),
+        "total_bytes": sum(e.size for e in entries),
+        "by_kind": {},
+    }
+    for kind in ("eigenvalues", "subclusters"):
+        sel = [e for e in entries if e.kind == kind]
+        out["by_kind"][kind] = {
+            "entries": len(sel),
+            "bytes": sum(e.size for e in sel),
+            "oldest_age_days": max((e.age_days for e in sel), default=0.0),
+            "newest_age_days": min((e.age_days for e in sel), default=0.0),
+        }
+    return out
+
+
+def prune_cache(cache_dir: Optional[str] = None, *,
+                max_age_days: Optional[float] = None,
+                max_bytes: Optional[int] = None,
+                dry_run: bool = False) -> dict:
+    """Evict cache entries by age, then by total size (coldest first).
+
+    ``max_age_days`` drops every entry untouched for longer than that.
+    ``max_bytes`` then evicts coldest-first until the cache fits. Both
+    are optional; with neither set this reports what it would do and
+    changes nothing.
+
+    Returns a summary dict. Safe by construction: every entry is
+    content-addressed and rebuilt on the next miss.
+    """
+    root = cache_dir or default_cache_dir()
+    entries = scan_cache(root)
+    before_bytes = sum(e.size for e in entries)
+    doomed, reasons = [], {}
+
+    if max_age_days is not None:
+        for e in entries:
+            if e.age_days > max_age_days:
+                doomed.append(e)
+                reasons[id(e)] = f"age {e.age_days:.1f}d > {max_age_days}d"
+
+    if max_bytes is not None:
+        doomed_ids = {id(e) for e in doomed}
+        kept = [e for e in entries if id(e) not in doomed_ids]
+        running = sum(e.size for e in kept)
+        # Coldest first: the least recently used entries go first.
+        for e in sorted(kept, key=lambda x: x.recency):
+            if running <= max_bytes:
+                break
+            doomed.append(e)
+            reasons[id(e)] = "over size budget"
+            running -= e.size
+
+    removed_bytes, removed_files, errors = 0, 0, 0
+    if not dry_run:
+        for e in doomed:
+            for p in e.paths:
+                try:
+                    os.remove(p)
+                    removed_files += 1
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    logging.warning("[cache-prune] could not remove %s: %s",
+                                    p, exc)
+                    errors += 1
+            removed_bytes += e.size
+        _remove_empty_dirs(root)
+    else:
+        removed_bytes = sum(e.size for e in doomed)
+
+    return {
+        "cache_dir": root,
+        "dry_run": dry_run,
+        "entries_before": len(entries),
+        "entries_removed": len(doomed),
+        "bytes_before": before_bytes,
+        "bytes_removed": removed_bytes,
+        "bytes_after": before_bytes - removed_bytes,
+        "files_removed": removed_files,
+        "errors": errors,
+        "reasons": {e.key: reasons[id(e)] for e in doomed},
+    }
+
+
+def _remove_empty_dirs(root: str) -> None:
+    """Drop the shard directories an eviction just emptied."""
+    for dirpath, dirnames, filenames in os.walk(root, topdown=False):
+        if dirpath == root or dirnames or filenames:
+            continue
+        try:
+            os.rmdir(dirpath)
+        except OSError:
+            pass
+
+
+def clear_cache(cache_dir: Optional[str] = None) -> dict:
+    """Remove every entry. Equivalent to ``prune_cache(max_age_days=-1)``."""
+    return prune_cache(cache_dir, max_age_days=-1.0)

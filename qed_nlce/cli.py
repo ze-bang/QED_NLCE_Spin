@@ -133,6 +133,66 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
                    help=argparse.SUPPRESS)
 
 
+def _human(n: int) -> str:
+    """Bytes -> a short human string."""
+    x = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if x < 1024.0 or unit == "TB":
+            return f"{x:.1f} {unit}" if unit != "B" else f"{int(x)} B"
+        x /= 1024.0
+
+
+def _run_cache_maintenance(args) -> int:
+    """``--cache_stats`` / ``--cache_prune`` / ``--cache_clear``.
+
+    The cache is content-addressed and every entry is rebuildable, so
+    eviction only ever costs recomputation on the next miss.
+    """
+    from .core.cache import cache_stats, prune_cache, clear_cache
+
+    root = args.cache_dir
+
+    if args.cache_stats:
+        st = cache_stats(root)
+        print(f"Cache: {st['cache_dir']}")
+        if not st["exists"]:
+            print("  (does not exist yet -- nothing cached)")
+            return 0
+        print(f"  {st['total_entries']} entries, {_human(st['total_bytes'])} total")
+        for kind, k in st["by_kind"].items():
+            if not k["entries"]:
+                continue
+            print(f"    {kind:14s} {k['entries']:6d} entries  "
+                  f"{_human(k['bytes']):>10s}  "
+                  f"oldest {k['oldest_age_days']:.1f}d, "
+                  f"newest {k['newest_age_days']:.1f}d")
+        return 0
+
+    if args.cache_clear:
+        r = clear_cache(root)
+        print(f"Cleared {r['entries_removed']} entries "
+              f"({_human(r['bytes_removed'])}) from {r['cache_dir']}")
+        return 0
+
+    # --cache_prune
+    max_bytes = (int(args.cache_max_gb * 1024 ** 3)
+                 if args.cache_max_gb is not None else None)
+    if args.cache_max_age_days is None and max_bytes is None:
+        print("--cache_prune needs --cache_max_age_days and/or --cache_max_gb; "
+              "nothing to do.")
+        return 2
+    r = prune_cache(root, max_age_days=args.cache_max_age_days,
+                    max_bytes=max_bytes, dry_run=args.cache_dry_run)
+    verb = "Would remove" if r["dry_run"] else "Removed"
+    print(f"Cache: {r['cache_dir']}")
+    print(f"  {verb} {r['entries_removed']} of {r['entries_before']} entries "
+          f"({_human(r['bytes_removed'])})")
+    print(f"  {_human(r['bytes_before'])} -> {_human(r['bytes_after'])}")
+    if r["errors"]:
+        print(f"  {r['errors']} file(s) could not be removed")
+    return 0
+
+
 def _print_listing() -> None:
     """``--list``: enumerate registered geometries and pipelines."""
     print("Registered NLCE geometries:")
@@ -162,11 +222,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     pre.add_argument("--pipeline", type=str, default=None,
                      choices=list_pipelines(),
                      help="ED pipeline (see --list)")
+    # Cache maintenance. Handled here, before geometry/pipeline become
+    # required, so `qed_nlce --cache_stats` works with no other args.
+    pre.add_argument("--cache_stats", action="store_true",
+                     help="Report cache occupancy and exit")
+    pre.add_argument("--cache_prune", action="store_true",
+                     help="Evict cache entries by age and/or total size, then exit")
+    pre.add_argument("--cache_clear", action="store_true",
+                     help="Remove every cache entry and exit")
+    pre.add_argument("--cache_max_age_days", type=float, default=None,
+                     help="With --cache_prune: drop entries unused for longer than this")
+    pre.add_argument("--cache_max_gb", type=float, default=None,
+                     help="With --cache_prune: evict coldest-first until under this size")
+    pre.add_argument("--cache_dry_run", action="store_true",
+                     help="With --cache_prune: report what would go, delete nothing")
+    pre.add_argument("--cache_dir", type=str, default=None,
+                     help="Cache root (default: $QED_NLCE_CACHE or ~/.cache/qed_nlce)")
     pre_args, remaining = pre.parse_known_args(argv)
 
     if pre_args.list:
         _print_listing()
         return 0
+
+    if pre_args.cache_stats or pre_args.cache_prune or pre_args.cache_clear:
+        return _run_cache_maintenance(pre_args)
 
     # Pipeline now defaults to the SOTA ``auto`` hybrid (FULL <= 2**12,
     # KPM-DOS above) when only --geometry was given. Geometry itself

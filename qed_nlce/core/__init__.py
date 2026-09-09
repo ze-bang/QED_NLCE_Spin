@@ -33,10 +33,15 @@ from .dense_ed import (
     run_ed_in_process,
 )
 from .cache import (
+    CacheEntry,
     EigenvalueCache,
     SubclusterCache,
+    cache_stats,
     canonical_cluster_hash,
+    clear_cache,
     default_cache_dir,
+    prune_cache,
+    scan_cache,
 )
 from .io import (
     HAS_H5PY,
@@ -60,10 +65,15 @@ __all__ = [
     "can_run_in_process",
     "run_ed_in_process",
     # cache
+    "CacheEntry",
     "EigenvalueCache",
     "SubclusterCache",
+    "cache_stats",
     "canonical_cluster_hash",
+    "clear_cache",
     "default_cache_dir",
+    "prune_cache",
+    "scan_cache",
     # io
     "HAS_H5PY",
     "ClusterEntry",
