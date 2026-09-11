@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  schedule:
+    # Nightly: the slow tier (high-order cluster generation, engine parity)
+    # that ``addopts = -m 'not slow'`` keeps out of every push run.
+    - cron: "17 4 * * *"
 
 # Cancel superseded runs on the same ref.
 concurrency:
@@ -16,9 +20,12 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Single lane: build the sibling ze-bang/QED wheel from its main branch
-  # (CPU-only, same CMAKE_ARGS as QED's own wheel CI job) and run the
-  # complete suite. There is deliberately NO "core, no-QED" lane:
+  # Single lane: build the sibling ze-bang/QED_Spin wheel from its main
+  # branch (CPU-only, same CMAKE_ARGS as QED's own wheel CI job) and run
+  # the complete suite. QED_Spin is the PUBLIC engine repo: cloning the
+  # private ze-bang/QED over unauthenticated https failed with
+  # "could not read Username for https://github.com" (exit 128), which is
+  # what had been turning this workflow red since 2026-09-09. There is deliberately NO "core, no-QED" lane:
   # NLCEWorkflow calls assert_qed_available() at init for every pipeline
   # (fail fast before cluster work), so the e2e tests -- which spawn
   # `python -m qed_nlce` subprocesses -- hard-require qed. A qed-less
@@ -32,7 +39,10 @@ jobs:
   full-with-qed:
     name: Linux / full suite (QED exact tier)
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    # Push runs finish in ~15 min (QED_Spin wheel build dominates); the
+    # nightly additionally carries the slow tier, whose high-order cluster
+    # generation runs for tens of minutes.
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -63,9 +73,9 @@ jobs:
           python -m pip install "scikit-build-core>=0.10" "pybind11>=2.13"
           python -m pip install -e .[dev]
 
-      - name: Clone QED (main)
+      - name: Clone QED_Spin (main)
         run: |
-          git clone --depth 1 --branch main https://github.com/ze-bang/QED.git .qed-src
+          git clone --depth 1 --branch main https://github.com/ze-bang/QED_Spin.git .qed-src
           git -C .qed-src log -1 --oneline
 
       - name: Build + install qed wheel (CPU-only)
@@ -81,3 +91,12 @@ jobs:
       - name: Run pytest (full suite incl. exact tier)
         run: |
           python -m pytest tests -v -rs
+
+      - name: Slow tier (nightly / manual only)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          python -m pytest tests -m slow -v -rs
+
+      - name: Symmetry benchmark (spectra must match the plain dense lane)
+        run: |
+          python scripts/benchmark_symmetry.py --max-n 12

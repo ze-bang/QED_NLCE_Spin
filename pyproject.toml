@@ -57,7 +57,7 @@ qed-nlce-convergence-report = "qed_nlce.analysis.convergence_report:main"
 Homepage = "https://github.com/ze-bang/QED_NLCE"
 Source = "https://github.com/ze-bang/QED_NLCE"
 "Bug Tracker" = "https://github.com/ze-bang/QED_NLCE/issues"
-"QED toolkit" = "https://github.com/ze-bang/QED"
+"QED toolkit" = "https://github.com/ze-bang/QED_Spin"
 
 [tool.setuptools.packages.find]
 where = ["."]

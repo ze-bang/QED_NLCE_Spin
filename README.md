@@ -2,7 +2,7 @@
 
 Numerical Linked Cluster Expansion (NLCE) workflows for frustrated quantum
 spin-1/2 models (pyrochlore, triangular), powered by the **QED C++ exact
-diagonalization engine** ([ze-bang/QED](https://github.com/ze-bang/QED)).
+diagonalization engine** ([ze-bang/QED_Spin](https://github.com/ze-bang/QED_Spin)).
 
 QED_NLCE owns the NLCE mathematics — cluster generation (via
 [`pynauty`](https://github.com/pdobsan/pynauty) canonical certificates),
