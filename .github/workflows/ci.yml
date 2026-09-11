@@ -6,9 +6,11 @@ on:
   pull_request:
   workflow_dispatch:
   schedule:
-    # Nightly: the slow tier (high-order cluster generation, engine parity)
-    # that ``addopts = -m 'not slow'`` keeps out of every push run.
-    - cron: "17 4 * * *"
+    # Weekly: the slow tier (high-order cluster generation, engine parity)
+    # that ``addopts = -m 'not slow'`` keeps out of every push run. Weekly,
+    # not nightly: it measured 36 min on a 32-core workstation and these are
+    # generation invariants that only move when cluster generation changes.
+    - cron: "17 4 * * 0"
 
 # Cancel superseded runs on the same ref.
 concurrency:
@@ -39,10 +41,7 @@ jobs:
   full-with-qed:
     name: Linux / full suite (QED exact tier)
     runs-on: ubuntu-22.04
-    # Push runs finish in ~15 min (QED_Spin wheel build dominates); the
-    # nightly additionally carries the slow tier, whose high-order cluster
-    # generation runs for tens of minutes.
-    timeout-minutes: 90
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -92,11 +91,72 @@ jobs:
         run: |
           python -m pytest tests -v -rs
 
-      - name: Slow tier (nightly / manual only)
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-        run: |
-          python -m pytest tests -m slow -v -rs
-
       - name: Symmetry benchmark (spectra must match the plain dense lane)
         run: |
           python scripts/benchmark_symmetry.py --max-n 12
+
+  # ---------------------------------------------------------------------------
+  # Slow tier: the four ``@pytest.mark.slow`` tests (order-7/8 pyrochlore and
+  # triangle cluster generation, ring-16 engine parity). ``addopts = -m 'not
+  # slow'`` keeps them out of every other run, so before this job they ran
+  # nowhere. Own job, own timeout: they measured 36 min on a 32-core
+  # workstation (order-7/8 pyrochlore invariance alone is 25 min, ring-16
+  # parity 9 min) and a 2-core hosted runner is slower still, which is more
+  # than the fast lane's budget.
+  #
+  # Schedule fires on the PUBLIC mirror only: Actions minutes are billed on
+  # the private repo and the two trees are kept identical, so paying for the
+  # same run twice buys nothing. `workflow_dispatch` runs it in either repo.
+  # ---------------------------------------------------------------------------
+  slow-tier:
+    name: Linux / slow tier (cluster generation + engine parity)
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'schedule' &&
+       github.repository == 'ze-bang/QED_NLCE_Spin')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install QED build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            ninja-build \
+            libopenblas-dev \
+            liblapacke-dev \
+            libhdf5-dev \
+            libhdf5-cpp-103 \
+            libeigen3-dev \
+            pkg-config
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install qed_nlce + build tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "scikit-build-core>=0.10" "pybind11>=2.13"
+          python -m pip install -e .[dev]
+
+      - name: Clone QED_Spin (main)
+        run: |
+          git clone --depth 1 --branch main https://github.com/ze-bang/QED_Spin.git .qed-src
+          git -C .qed-src log -1 --oneline
+
+      - name: Build + install qed wheel (CPU-only)
+        env:
+          CMAKE_ARGS: "-DBUILD_ED_TESTS=OFF -DWITH_CUDA=OFF -DWITH_MPI=OFF -DBLAS_PROFILE=OPENBLAS"
+        run: |
+          python -m pip install -v ./.qed-src
+
+      - name: Run the slow tier
+        run: |
+          python -m pytest tests -m slow -v -rs --durations=10
