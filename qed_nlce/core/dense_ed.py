@@ -81,15 +81,28 @@ def assert_qed_available() -> None:
     # finder is present, strip the finder and front-pin the source tree;
     # wheel-only installs (no sibling tree) are untouched.
     if "qed" not in sys.modules:
-        qed_py = os.path.abspath(os.path.join(
-            os.path.dirname(__file__), "..", "..", "..", "QED", "python"))
-        so_dir = os.path.join(qed_py, "qed")
-        has_core = os.path.isdir(so_dir) and any(
-            f.startswith("_core") and f.endswith(".so")
-            for f in os.listdir(so_dir))
+        def _carries_core(base):
+            try:
+                return any(f.startswith("_core") and f.endswith(".so")
+                           for f in os.listdir(os.path.join(base, "qed")))
+            except OSError:
+                return False
+
+        # A caller that set QED_CORE_DIR has already pinned a build (PYTHONPATH gives
+        # the source package, QED_CORE_DIR the extension): never re-pin under it.
+        # Otherwise fall back to a sibling SOURCE tree that carries a built _core,
+        # newest name first. That list used to be the single hard-coded "QED", the
+        # RETIRED repo name: with a stale build still lying there it silently pinned
+        # the old library, so a downstream gate could report green while exercising
+        # code nobody was changing.
+        _here = os.path.dirname(__file__)
+        _siblings = [os.path.abspath(os.path.join(_here, "..", "..", "..", name, "python"))
+                     for name in ("QED_Spin", "QED")]
+        qed_py = (None if os.environ.get("QED_CORE_DIR")
+                  else next((c for c in _siblings if _carries_core(c)), None))
         has_editable_finder = any(
             "editable" in type(f).__module__.lower() for f in sys.meta_path)
-        if has_core and has_editable_finder:
+        if qed_py and has_editable_finder:
             sys.meta_path = [
                 f for f in sys.meta_path
                 if "editable" not in type(f).__module__.lower()

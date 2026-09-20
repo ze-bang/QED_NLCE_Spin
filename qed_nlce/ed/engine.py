@@ -124,14 +124,14 @@ def resolve_cluster_symmetry(qop, *, verbose: bool = False) -> ClusterSymmetry:
 def _abelian_and_residues(cs: ClusterSymmetry, n: int):
     """(A_elements, residues) for the factorized engine, mirroring what
     qed.full_spectrum's projection lane will actually use."""
-    from qed.point_group_routing import split_nonabelian, _close
+    from qed.symmetry import close_group, split_nonabelian      # public since WP13
 
     if cs.gens is None:
         return [list(range(n))], []
     split = split_nonabelian(cs.gens)
     if isinstance(split, str):
         # Pure-abelian (no residue) or over-cap: close the generators.
-        A = _close([list(g) for g in cs.gens.generators])
+        A = close_group([list(g) for g in cs.gens.generators])
         if A is None:
             return [list(range(n))], []
         return [list(a) for a in A], []
